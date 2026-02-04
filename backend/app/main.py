@@ -1,34 +1,76 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import settings
+# main.py
+from fastapi import FastAPI, Depends
+from enum import Enum
+from pydantic import BaseModel
+from typing import Annotated
+from fastapi.security import OAuth2PasswordBearer
+# Create an instance of the FastAPI class and assign it to the 'app' variable
+app = FastAPI()
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json"
-)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl = "token")
+class ModelName(str, Enum):
+    home = "home"
+    login = "login"
+    dashboard = "dashboard"
+    profile = "profile"
+    about = "about"
+    contact = "contact"
 
-# CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class User(BaseModel):
+    username : str
+    email : str | None = None 
+    fullname : str | None = None
+
+def fake_decode_token(token):
+    return User(
+        username = token + "fakedecoded",
+        email = "john.example.com",
+        fullname = "John Doe"
+    )    
+
+async def get_current_user(token : Annotated[str, Depends(oauth2_scheme)]):
+    user = fake_decode_token(token)
+    return user
 
 @app.get("/")
-async def root():
-    return {
-        "message": "Healthcare System API",
-        "version": settings.VERSION,
-        "docs": f"{settings.API_V1_STR}/docs"
-    }
+async def read_items(current_user : Annotated[User, Depends(oauth2_scheme)]):
+    return current_user
+    
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+@app.post("/{model_name}")
+async def users(model_name : ModelName, details: User):
+    if model_name == ModelName.login and details:
+       return {
+            "model_name": model_name,
+            "username" :details.username,
+            "email" : details.email,
+            "fullname" : details.fullname
+       }
+    return {"model_name": model_name, "message": "This is not the about page"}
 
-# We'll add more routes later
-# from app.api.v1.router import api_router
-# app.include_router(api_router, prefix=settings.API_V1_STR)
+
+
+@app.get("/{model_name}")
+async def get_model(model_name : ModelName):
+    if model_name == ModelName.home:
+        return {"model_name": model_name, "message": "This is the home page"}
+    if model_name.value == "login":
+        return {"model_name": model_name, "message": "This is the login page"}
+    if model_name == ModelName.dashboard:
+        return {"model_name": model_name, "message": "This is the dashboard"}
+    return {"model_name": model_name, "message": "This is some other page"}
+
+
+# Define a path operation decorator
+@app.get("/users/me")
+async def read_user_me():
+    return {"Hello": "me"}
+
+@app.get("/users/{user_id}")
+async def read_user(user_id : int):
+    return {"Hello" : user_id}
+
+@app.get("/{item_id}")
+async def root(item_id : int):
+    return {"Hello": item_id}
+
