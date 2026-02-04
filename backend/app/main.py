@@ -1,13 +1,18 @@
 # main.py
 from fastapi import FastAPI, Depends
+from fastapi.security import OAuth2PasswordRequestForm
 from enum import Enum
-from pydantic import BaseModel
 from typing import Annotated
-from fastapi.security import OAuth2PasswordBearer
+from .security import (
+    get_current_active_user,
+    login,
+    User,
+)
+
+
 # Create an instance of the FastAPI class and assign it to the 'app' variable
 app = FastAPI()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl = "token")
 class ModelName(str, Enum):
     home = "home"
     login = "login"
@@ -15,43 +20,32 @@ class ModelName(str, Enum):
     profile = "profile"
     about = "about"
     contact = "contact"
+    users = "users"
 
-class User(BaseModel):
-    username : str
-    email : str | None = None 
-    fullname : str | None = None
 
-def fake_decode_token(token):
-    return User(
-        username = token + "fakedecoded",
-        email = "john.example.com",
-        fullname = "John Doe"
-    )    
 
-async def get_current_user(token : Annotated[str, Depends(oauth2_scheme)]):
-    user = fake_decode_token(token)
-    return user
+@app.post("/token")
+async def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+):
+    return await login(form_data)
 
-@app.get("/")
-async def read_items(current_user : Annotated[User, Depends(oauth2_scheme)]):
-    return current_user
-    
 
-@app.post("/{model_name}")
-async def users(model_name : ModelName, details: User):
+@app.post("/pages/{model_name}")
+async def users(model_name: ModelName, details: User):
     if model_name == ModelName.login and details:
        return {
             "model_name": model_name,
             "username" :details.username,
             "email" : details.email,
-            "fullname" : details.fullname
+            "fullname" : details.full_name
        }
-    return {"model_name": model_name, "message": "This is not the about page"}
+    return {"model_name": model_name, "message": "This is not the login page"}
 
 
 
-@app.get("/{model_name}")
-async def get_model(model_name : ModelName):
+@app.get("/pages/{model_name}")
+async def get_model(model_name: ModelName):
     if model_name == ModelName.home:
         return {"model_name": model_name, "message": "This is the home page"}
     if model_name.value == "login":
@@ -63,14 +57,9 @@ async def get_model(model_name : ModelName):
 
 # Define a path operation decorator
 @app.get("/users/me")
-async def read_user_me():
-    return {"Hello": "me"}
+async def read_user_me(current_user: Annotated[User, Depends(get_current_active_user)]):
+    return current_user
 
 @app.get("/users/{user_id}")
 async def read_user(user_id : int):
     return {"Hello" : user_id}
-
-@app.get("/{item_id}")
-async def root(item_id : int):
-    return {"Hello": item_id}
-
