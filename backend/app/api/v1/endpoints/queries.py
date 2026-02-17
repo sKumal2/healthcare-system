@@ -24,6 +24,7 @@ def send_message(
         user_id=user["user_id"],
         organization_id=user["organization_id"],
         query=request.content,
+        #look into .content, seems odd here
     )
 
     return result
