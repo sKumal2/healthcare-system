@@ -1,6 +1,6 @@
 import uuid
 class QueryService:
-    def processRequest(
+    def processQuery(
         self, 
         conversation_id: str,
         user_id: int,
