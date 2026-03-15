@@ -1,20 +1,200 @@
-import uuid
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from datetime import datetime
+import hashlib
+
+
+class QueryRequest(BaseModel):
+    """Request model for asking a question."""
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class SourceMetadata(BaseModel):
+    """Metadata for a source document cited in the answer."""
+    document_id: str
+    title: str
+    source_url: Optional[str] = None
+    author: Optional[str] = None
+    similarity_score: float
+
+
+class QueryResponse(BaseModel):
+    """Response model containing the answer and sources."""
+    question: str
+    answer: str
+    sources: List[SourceMetadata]
+    tokens_used: Optional[int] = None
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class QueryService:
-    def processQuery(
-        self, 
-        conversation_id: str,
-        user_id: int,
-        organization_id: int,
-        query: str,
-    ):
-        response = "Hello World!"
-
-
-        return {
-            "message_id": str(uuid.uuid4()),
-            "response": response,
-            "citations": [],
-            "tokens_used": 0,
-        }
-
+    """Service layer for question-answering using RAG."""
     
+    def __init__(self, document_service=None):
+        """
+        Initialize QueryService.
+        
+        Args:
+            document_service: Optional DocumentService instance for vector search.
+                            If None, will use mock search.
+        """
+        self.document_service = document_service
+    
+    def _generate_question_embedding(self, question: str) -> List[float]:
+        """
+        Generate embedding for the question (mock implementation).
+        
+        Args:
+            question: User's question text
+        
+        Returns:
+            384-dimensional embedding vector
+        """
+        hash_val = int(hashlib.md5(question.encode()).hexdigest(), 16)
+        return [(hash_val >> i) % 100 / 100.0 for i in range(384)]
+    
+    def _retrieve_context_chunks(self, question: str, top_k: int) -> List[dict]:
+        """
+        Retrieve relevant document chunks from vector database.
+        
+        Args:
+            question: User's question
+            top_k: Number of top results to retrieve
+        
+        Returns:
+            List of dicts with keys: content, document_id, title, 
+            source_url, author, similarity_score
+        """
+        if self.document_service is None:
+            return []
+        
+        # Use document service's search method
+        search_results = self.document_service.search(
+            query_text=question,
+            top_k=top_k
+        )
+        
+        # Convert DocumentSearchResult to dict format
+        chunks = []
+        for result in search_results:
+            chunks.append({
+                "content": result.content,
+                "document_id": result.metadata.document_id,
+                "title": result.metadata.title,
+                "source_url": result.metadata.source_url,
+                "author": result.metadata.author,
+                "similarity_score": result.similarity_score
+            })
+        
+        return chunks
+    
+    def _build_prompt(self, question: str, context_chunks: List[dict]) -> str:
+        """
+        Build the LLM prompt with retrieved context.
+        
+        Args:
+            question: User's question
+            context_chunks: List of relevant document chunks
+        
+        Returns:
+            Formatted prompt string
+        """
+        if not context_chunks:
+            return f"Question: {question}\n\nContext: No relevant documents found."
+        
+        # Format context from chunks
+        context_str = "\n\n".join(
+            f"Source: {chunk['title']}\nContent: {chunk['content']}"
+            for chunk in context_chunks
+        )
+        
+        prompt = (
+            f"You are a helpful healthcare assistant. Answer the following question "
+            f"based on the provided context. If the context doesn't contain relevant information, "
+            f"say so clearly.\n\n"
+            f"Context:\n{context_str}\n\n"
+            f"Question: {question}\n\n"
+            f"Answer:"
+        )
+        
+        return prompt
+    
+    def _generate_answer(self, prompt: str) -> str:
+        """
+        Generate an answer using the LLM (mock implementation).
+        
+        In production, this would call an actual LLM API (OpenAI, Anthropic, etc.)
+        or run a local model using LangChain, Ollama, etc.
+        
+        Args:
+            prompt: Formatted prompt for the LLM
+        
+        Returns:
+            Generated answer text
+        """
+        # Mock response - in production, call actual LLM
+        answer = (
+            "Based on the provided context, this answer addresses your question. "
+            "In a production system, this would be generated by a large language model "
+            "like GPT-4 or similar, instructed to answer using only the provided context."
+        )
+        return answer
+    
+    def ask_question(self, query_request: QueryRequest) -> QueryResponse:
+        """
+        Answer a question using RAG (Retrieval-Augmented Generation).
+        
+        Process:
+        1. Embed the question
+        2. Retrieve relevant document chunks from vector DB
+        3. Build a prompt with context
+        4. Generate answer via LLM
+        5. Extract and return sources
+        
+        Args:
+            query_request: QueryRequest containing question and optional top_k
+        
+        Returns:
+            QueryResponse with answer and source metadata
+        """
+        question = query_request.question
+        top_k = query_request.top_k
+        
+        # Step 1: Embed the question
+        question_embedding = self._generate_question_embedding(question)
+        
+        # Step 2: Retrieve context chunks from vector database
+        context_chunks = self._retrieve_context_chunks(question, top_k)
+        
+        # Step 3: Build LLM prompt
+        prompt = self._build_prompt(question, context_chunks)
+        
+        # Step 4: Generate answer via LLM
+        answer = self._generate_answer(prompt)
+        
+        # Step 5: Extract unique sources (deduped by document_id)
+        seen_docs = set()
+        sources = []
+        
+        for chunk in context_chunks:
+            doc_id = chunk["document_id"]
+            if doc_id not in seen_docs:
+                seen_docs.add(doc_id)
+                sources.append(
+                    SourceMetadata(
+                        document_id=doc_id,
+                        title=chunk["title"],
+                        source_url=chunk["source_url"],
+                        author=chunk["author"],
+                        similarity_score=chunk["similarity_score"]
+                    )
+                )
+        
+        # Return structured response
+        return QueryResponse(
+            question=question,
+            answer=answer,
+            sources=sources,
+            tokens_used=None  # Can be computed in production
+        )
