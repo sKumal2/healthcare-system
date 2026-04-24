@@ -364,7 +364,7 @@ class AdminService:
             )
         
         # Generate API key
-        plaintext_key = f"sk_live_{secrets.token_urlsafe(32)}"
+        plaintext_key = f"api_key_{secrets.token_urlsafe(32)}"
         key_hash = self._hash_api_key(plaintext_key)
         
         # Calculate expiration

@@ -103,8 +103,8 @@ SERVICE FLOW:
     1. Verify admin role (✓ John is admin)
     2. Find user (✓ Sarah exists, user_id=2)
     3. Generate secure random key:
-       plaintext_key = "sk_live_" + base64(secrets.token_bytes(32))
-       plaintext_key = "sk_live_xY7kZj9_mN2pQ5rTvWxYzA==..."
+       plaintext_key = "api_key_" + base64(secrets.token_bytes(32))
+       plaintext_key = "api_key_xY7kZj9_mN2pQ5rTvWxYzA==..."
     4. Hash with SHA-256 (should be bcrypt in production):
        key_hash = sha256(plaintext_key)
        key_hash = "a4f9d8e2c1b3f7a9e5d6c8b2f1a4e7..."
@@ -127,7 +127,7 @@ SERVICE FLOW:
 RESPONSE:
   {
       "id": "1",
-      "key": "sk_live_xY7kZj9_mN2pQ5rTvWxYzA==...",  ← Plaintext only here!
+      "key": "api_key_xY7kZj9_mN2pQ5rTvWxYzA==...",  ← Plaintext only here!
       "name": "Mobile App Integration - Production"
   }
   ⚠️  CLIENT RESPONSIBILITY: Sarah must save this key immediately - it won't be shown again!

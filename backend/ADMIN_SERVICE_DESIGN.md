@@ -94,7 +94,7 @@ class UserCreate(UserBase):
 - **Sensitive Data Masking**: Separate function handles masking based on field type:
   ```python
   mask_sensitive_data("user@example.com", "email") → "u***@example.com"
-  mask_sensitive_data("sk_live_abc123xyz", "api_key") → "sk_live_****"
+  mask_sensitive_data("api_key_abc123xyz", "api_key") → "api_key_****"
   ```
   - Used when logging changes involving sensitive fields
   - Prevents accidental data leaks in audit logs

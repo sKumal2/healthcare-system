@@ -197,7 +197,7 @@ To use this admin service:
    Response:
    {
        "id": "123",
-       "key": "sk_live_abcd1234efgh5678ijkl9012mnop",
+       "key": "api_key_abcd1234efgh5678ijkl9012mnop",
        "name": "Mobile App Integration"
    }
    # NOTE: This is the ONLY time the key is shown in plaintext!

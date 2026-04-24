@@ -298,7 +298,7 @@ def bad_api_key_storage(self, user_id: int):
 
 # ✅ CORRECT: Always hash sensitive data
 def good_api_key_storage(self, user_id: int):
-    plaintext_key = f"sk_live_{secrets.token_urlsafe(32)}"
+    plaintext_key = f"api_key_{secrets.token_urlsafe(32)}"
     # ✅ Hash before storing
     key_hash = hashlib.sha256(plaintext_key.encode()).hexdigest()
     api_key = ApiKeyModel(key_hash=key_hash)

@@ -81,7 +81,7 @@ def mask_sensitive_data(data: str, pattern: str = "default") -> str:
             return f"{match.group(1)}***{match.group(3)}"
     
     elif pattern == "api_key":
-        # Mask: sk_live_abcd1234 -> sk_live_****
+        # Mask: api_key_abcd1234 -> api_key_****
         if len(data) > 8:
             return f"{data[:8]}****"
     
