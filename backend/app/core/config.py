@@ -5,14 +5,51 @@ from __future__ import annotations
 
 from typing import List, Union
 
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Centralized configuration for the Healthcare RAG backend."""
 
-    BACKEND_CORS_ORIGINS: Union[List[AnyHttpUrl], str] = []
+    # ----- Application -----
+    PROJECT_NAME: str = "Healthcare RAG System"
+    VERSION: str = "1.0.0"
+    API_V1_STR: str = "/api/v1"
+    DEBUG: bool = False
+
+    # ----- Auth / JWT -----
+    SECRET_KEY: str = "change-me-in-production"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ----- Redis -----
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # ----- CORS -----
+    BACKEND_CORS_ORIGINS: Union[List[AnyHttpUrl], List[str], str] = []
+
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v):
+        """Allow JSON-array or comma-separated origins from env."""
+        if isinstance(v, str) and not v.startswith("["):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    # ----- Rate Limiting -----
+    RATE_LIMIT_USER_REQUESTS: int = 100
+    RATE_LIMIT_USER_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_IP_REQUESTS: int = 20
+    RATE_LIMIT_IP_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_ADMIN_REQUESTS: int = 300
+
+    # ----- Request Validation -----
+    MAX_REQUEST_SIZE_BYTES: int = 1_048_576  # 1MB
+
+    # ----- Security -----
+    ADMIN_IP_ALLOWLIST: str = ""  # comma-separated CIDRs, empty = disabled
 
     # ----- Vector DB -----
     VECTOR_DB_PROVIDER: str = "pinecone"  # "pinecone" | "weaviate"
@@ -42,6 +79,11 @@ class Settings(BaseSettings):
     def trusted_domains_list(self) -> list[str]:
         """Parse the comma-separated allowlist into a clean list of domains."""
         return [d.strip().lower() for d in self.TRUSTED_DOMAINS.split(",") if d.strip()]
+
+    @property
+    def admin_ip_allowlist_cidrs(self) -> list[str]:
+        """Parse the comma-separated admin IP allowlist into clean CIDR strings."""
+        return [c.strip() for c in self.ADMIN_IP_ALLOWLIST.split(",") if c.strip()]
 
     model_config = SettingsConfigDict(
         env_file=".env",
