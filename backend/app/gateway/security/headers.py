@@ -20,6 +20,9 @@ _SECURITY_HEADERS: dict[str, str] = {
     "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
 }
 
+# Swagger/ReDoc need CDN scripts and inline JS — skip the strict CSP for these paths.
+_DOCS_PATHS = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Append hardening headers to every response."""
@@ -29,6 +32,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         response = await call_next(request)
         for name, value in _SECURITY_HEADERS.items():
+            if name == "Content-Security-Policy" and request.url.path in _DOCS_PATHS:
+                continue
             response.headers.setdefault(name, value)
         # Avoid exposing tech stack via the Server header.
         if "server" in response.headers:

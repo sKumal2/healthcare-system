@@ -1,120 +1,109 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from typing import List, Optional
-from app.services.document_service import (
-    DocumentService,
-    DocumentSearchResult
-)
+"""
+Document management endpoints — upload and manage healthcare reference documents.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.session import get_db
+from app.dependencies import get_document_service
+from app.gateway.auth.dependencies import get_current_user, require_role
+from app.gateway.auth.models import UserIdentity
+from app.services.document_service import DocumentService
+
+router = APIRouter(prefix="/documents", tags=["Documents"])
+require_admin = require_role("admin")
 
 
-router = APIRouter(prefix="/documents", tags=["documents"])
-
-
-class UploadDocumentRequest(BaseModel):
-    """Request model for document upload."""
-    title: str
-    content: str
-    document_id: str
-    source_url: Optional[str] = None
-    author: Optional[str] = None
-
-
-class UploadDocumentResponse(BaseModel):
-    """Response model for document upload."""
-    document_id: str
-    chunks_stored: int
-    chunk_ids: List[str]
-    message: str
-
-
-class SearchDocumentRequest(BaseModel):
-    """Request model for document search."""
-    query: str = Field(..., min_length=1)
-    top_k: int = Field(default=5, ge=1, le=50)
-
-
-class SearchDocumentResponse(BaseModel):
-    """Response model for document search."""
-    query: str
-    results: List[DocumentSearchResult]
-    total_results: int
-
-
-def get_document_service() -> DocumentService:
-    """Dependency injection for DocumentService."""
-    return DocumentService()
-
-
-@router.post(
-    "/upload",
-    response_model=UploadDocumentResponse,
-    status_code=status.HTTP_201_CREATED
-)
+@router.post("", response_model=dict, summary="Upload a healthcare document")
 async def upload_document(
-    request: UploadDocumentRequest,
-    service: DocumentService = Depends(get_document_service)
-) -> UploadDocumentResponse:
-    """
-    Upload and process a document.
-    
-    - **title**: Document title
-    - **content**: Document text content
-    - **document_id**: Unique identifier for the document
-    - **source_url**: Optional URL where document was sourced
-    - **author**: Optional document author
-    """
-    try:
-        result = service.process_and_store(
-            document_text=request.content,
-            metadata={
-                "title": request.title,
-                "document_id": request.document_id,
-                "source_url": request.source_url,
-                "author": request.author
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    source_url: Optional[str] = Form(None),
+    author: Optional[str] = Form(None),
+    service: DocumentService = Depends(get_document_service),
+    current_user: UserIdentity = Depends(get_current_user),
+):
+    """Upload a PDF or text document to the RAG knowledge base."""
+    import uuid
+
+    content = await file.read()
+    result = await service.process_and_store(
+        document_text=content.decode("utf-8", errors="ignore"),
+        metadata={
+            "title": title,
+            "document_id": str(uuid.uuid4()),
+            "source_url": source_url,
+            "author": author,
+        },
+        file_content=content,
+        filename=file.filename,
+        organization_id=current_user.user_id,
+        uploaded_by=current_user.user_id,
+    )
+    return result
+
+
+@router.get("", response_model=dict, summary="List documents")
+async def list_documents(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserIdentity = Depends(get_current_user),
+):
+    """List all documents in the organization's knowledge base."""
+    from sqlalchemy import desc, select
+
+    from app.models.database import Document
+
+    stmt = (
+        select(Document)
+        .where(Document.is_active == True)  # noqa: E712
+        .order_by(desc(Document.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await db.execute(stmt)
+    docs = result.scalars().all()
+
+    return {
+        "items": [
+            {
+                "id": str(d.id),
+                "title": d.title,
+                "source_url": d.source_url,
+                "is_processed": d.is_processed,
+                "chunks_count": d.chunks_count,
+                "created_at": d.created_at,
             }
-        )
-        
-        return UploadDocumentResponse(
-            document_id=result["document_id"],
-            chunks_stored=result["chunks_stored"],
-            chunk_ids=result["chunk_ids"],
-            message=f"Document processed successfully into {result['chunks_stored']} chunks"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to process document: {str(e)}"
-        )
+            for d in docs
+        ],
+        "page": page,
+        "page_size": page_size,
+    }
 
 
-@router.post(
-    "/search",
-    response_model=SearchDocumentResponse,
-    status_code=status.HTTP_200_OK
-)
-async def search_documents(
-    request: SearchDocumentRequest,
-    service: DocumentService = Depends(get_document_service)
-) -> SearchDocumentResponse:
-    """
-    Search for documents using vector similarity.
-    
-    - **query**: Search query text
-    - **top_k**: Number of results to return (default: 5, max: 50)
-    """
-    try:
-        results = service.search(
-            query_text=request.query,
-            top_k=request.top_k
-        )
-        
-        return SearchDocumentResponse(
-            query=request.query,
-            results=results,
-            total_results=len(results)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Search failed: {str(e)}"
-        )
+@router.delete("/{document_id}", response_model=dict, summary="Delete a document")
+async def delete_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserIdentity = Depends(require_admin),
+):
+    """Soft-delete a document from the knowledge base (admin only)."""
+    from sqlalchemy import select
+
+    from app.models.database import Document
+
+    result = await db.execute(
+        select(Document).where(Document.id == document_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc.is_active = False
+    await db.commit()
+    return {"detail": "Document deleted successfully"}

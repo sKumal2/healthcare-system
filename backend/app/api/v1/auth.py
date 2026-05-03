@@ -14,7 +14,8 @@ from fastapi import APIRouter, Body, Depends, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
@@ -62,7 +63,7 @@ def _verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def _lookup_user(db: Session, username: str):
+async def _lookup_user(db: AsyncSession, username: str):
     """Look up a user record by email or username.
 
     Returns a tuple `(user_id, role, hashed_password, is_active)` or `None`.
@@ -73,7 +74,8 @@ def _lookup_user(db: Session, username: str):
         from app.models.database import User
     except Exception:  # noqa: BLE001
         return None
-    user = db.query(User).filter(User.email == username).first()
+    result = await db.execute(select(User).where(User.email == username))
+    user = result.scalar_one_or_none()
     if user is None:
         return None
     role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
@@ -83,10 +85,10 @@ def _lookup_user(db: Session, username: str):
 @router.post("/login", response_model=TokenPair)
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> TokenPair:
     """Validate credentials, issue a fresh access + refresh token pair."""
-    record = _lookup_user(db, form_data.username)
+    record = await _lookup_user(db, form_data.username)
     if record is None:
         raise PermissionDeniedError("Invalid credentials.")
     user_id, role, hashed_password, is_active = record

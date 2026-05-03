@@ -91,6 +91,21 @@ class Settings(BaseSettings):
         """Parse the comma-separated admin IP allowlist into clean CIDR strings."""
         return [c.strip() for c in self.ADMIN_IP_ALLOWLIST.split(",") if c.strip()]
 
+    # ----- Database -----
+    DB_HOST: str = "localhost"
+    DB_PORT: int = 5432
+    DB_USER: str = "healthcare_user"
+    DB_PASSWORD: str = "healthcare_password"
+    DB_NAME: str = "healthcare_db"
+
+    @property
+    def DATABASE_URL(self) -> str:
+        return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def SYNC_DATABASE_URL(self) -> str:
+        return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

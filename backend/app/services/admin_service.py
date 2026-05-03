@@ -10,8 +10,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+import bcrypt
 from fastapi import HTTPException, status
-from passlib.context import CryptContext
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,8 +40,6 @@ from app.utils.audit import (
 )
 
 UTC = timezone.utc
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class AdminService:
@@ -203,6 +201,15 @@ class AdminService:
         )
 
         await self.session.commit()
+        return UserResponse.from_orm(user)
+
+    async def get_user_by_id(self, user_id: str) -> UserResponse:
+        result = await self.session.execute(
+            select(User).where(User.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
         return UserResponse.from_orm(user)
 
     async def get_users(
@@ -559,11 +566,14 @@ class AdminService:
 
     @staticmethod
     def _hash_password(password: str) -> str:
-        return pwd_context.hash(password)
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
     @staticmethod
     def _verify_password(plain: str, hashed: str) -> bool:
-        return pwd_context.verify(plain, hashed)
+        try:
+            return bcrypt.checkpw(plain.encode(), hashed.encode())
+        except Exception:
+            return False
 
     @staticmethod
     def _hash_api_key(key: str) -> str:

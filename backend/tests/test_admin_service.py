@@ -13,8 +13,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.database import RoleEnum, UserModel
-from app.services.admin_service import AdminService, pwd_context
+from app.models.database import RoleEnum, User as UserModel
+import bcrypt as _bcrypt
+
+from app.services.admin_service import AdminService
 from app.utils.audit import create_audit_log
 
 
@@ -24,7 +26,7 @@ def admin_user():
         id=1,
         organization_id=1,
         email="admin@test.com",
-        hashed_password="placeholder",
+        password_hash="placeholder",
         full_name="Test Admin",
         role=RoleEnum.ADMIN,
         is_active=True,
@@ -62,7 +64,7 @@ def test_sha256_hash_does_not_pass_verification():
     legacy_sha = hashlib.sha256(plain.encode()).hexdigest()
     # passlib raises on malformed hashes — assert it does not silently succeed.
     try:
-        result = pwd_context.verify(plain, legacy_sha)
+        result = _bcrypt.checkpw(plain.encode(), legacy_sha.encode())
     except Exception:
         result = False
     assert result is False
@@ -91,7 +93,7 @@ def test_constructor_rejects_non_admin(mock_async_session):
         id=2,
         organization_id=1,
         email="x@test.com",
-        hashed_password="x",
+        password_hash="x",
         full_name="x",
         role=RoleEnum.PATIENT,
         is_active=True,
