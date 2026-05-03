@@ -24,13 +24,13 @@ from app.models.admin_schemas import (
     UserUpdate,
 )
 from app.models.database import (
-    ApiKeyModel,
-    AuditLogModel,
-    QueryAnalyticsModel,
-    RateLimitModel,
-    RoleEnum,
-    UserModel,
+    ApiKey,
+    AuditLog,
+    QueryAnalytics,
+    RateLimit,
+    User,
 )
+from app.models.enums import RoleEnum
 from app.utils.audit import (
     check_privilege_escalation,
     create_audit_log,
@@ -47,7 +47,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 class AdminService:
     """Service for admin operations with full audit logging."""
 
-    def __init__(self, session: AsyncSession, current_admin: UserModel):
+    def __init__(self, session: AsyncSession, current_admin: User):
         self.session = session
         self.current_admin = current_admin
 
@@ -61,7 +61,7 @@ class AdminService:
 
     async def create_user(self, user_data: UserCreate) -> UserResponse:
         result = await self.session.execute(
-            select(UserModel).where(UserModel.email == user_data.email)
+            select(User).where(User.email == user_data.email)
         )
         existing_user = result.scalar_one_or_none()
 
@@ -83,11 +83,11 @@ class AdminService:
 
         hashed_password = self._hash_password(user_data.password)
 
-        new_user = UserModel(
+        new_user = User(
             organization_id=user_data.organization_id,
             email=user_data.email,
             full_name=user_data.full_name,
-            hashed_password=hashed_password,
+            password_hash=hashed_password,
             role=user_data.role,
             is_active=True,
         )
@@ -110,7 +110,7 @@ class AdminService:
 
     async def update_user(self, user_id: int, user_data: UserUpdate) -> UserResponse:
         result = await self.session.execute(
-            select(UserModel).where(UserModel.id == user_id)
+            select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
 
@@ -181,7 +181,7 @@ class AdminService:
             )
 
         result = await self.session.execute(
-            select(UserModel).where(UserModel.id == user_id)
+            select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
 
@@ -213,16 +213,16 @@ class AdminService:
         page: int = 1,
         page_size: int = 20,
     ) -> Dict[str, Any]:
-        query = select(UserModel)
+        query = select(User)
 
         if organization_id:
-            query = query.where(UserModel.organization_id == organization_id)
+            query = query.where(User.organization_id == organization_id)
         if role:
-            query = query.where(UserModel.role == role)
+            query = query.where(User.role == role)
         if is_active is not None:
-            query = query.where(UserModel.is_active == is_active)
+            query = query.where(User.is_active == is_active)
 
-        query = query.order_by(desc(UserModel.created_at))
+        query = query.order_by(desc(User.created_at))
 
         items, total, page, page_size, total_pages = await paginate_query(
             self.session, query, page, page_size
@@ -244,26 +244,26 @@ class AdminService:
         page: int = 1,
         page_size: int = 50,
     ) -> Dict[str, Any]:
-        query = select(AuditLogModel).where(
-            AuditLogModel.organization_id == self.current_admin.organization_id
+        query = select(AuditLog).where(
+            AuditLog.organization_id == self.current_admin.organization_id
         )
 
         if filters.user_id:
-            query = query.where(AuditLogModel.user_id == filters.user_id)
+            query = query.where(AuditLog.user_id == filters.user_id)
         if filters.action:
-            query = query.where(AuditLogModel.action.ilike(f"%{filters.action}%"))
+            query = query.where(AuditLog.action.ilike(f"%{filters.action}%"))
         if filters.resource_type:
-            query = query.where(AuditLogModel.resource_type == filters.resource_type)
+            query = query.where(AuditLog.resource_type == filters.resource_type)
         if filters.resource_id:
-            query = query.where(AuditLogModel.resource_id == filters.resource_id)
+            query = query.where(AuditLog.resource_id == filters.resource_id)
         if filters.status:
-            query = query.where(AuditLogModel.status == filters.status)
+            query = query.where(AuditLog.status == filters.status)
         if filters.start_date:
-            query = query.where(AuditLogModel.created_at >= filters.start_date)
+            query = query.where(AuditLog.created_at >= filters.start_date)
         if filters.end_date:
-            query = query.where(AuditLogModel.created_at <= filters.end_date)
+            query = query.where(AuditLog.created_at <= filters.end_date)
 
-        query = query.order_by(desc(AuditLogModel.created_at))
+        query = query.order_by(desc(AuditLog.created_at))
 
         items, total, page, page_size, total_pages = await paginate_query(
             self.session, query, page, page_size
@@ -281,7 +281,7 @@ class AdminService:
 
     async def create_api_key(self, user_id: int, key_data: ApiKeyCreate) -> Dict[str, str]:
         result = await self.session.execute(
-            select(UserModel).where(UserModel.id == user_id)
+            select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
 
@@ -297,7 +297,7 @@ class AdminService:
         if key_data.expires_in_days:
             expires_at = datetime.now(UTC) + timedelta(days=key_data.expires_in_days)
 
-        api_key = ApiKeyModel(
+        api_key = ApiKey(
             user_id=user_id,
             organization_id=user.organization_id,
             name=key_data.name,
@@ -329,9 +329,9 @@ class AdminService:
 
     async def revoke_api_key(self, api_key_id: int) -> Dict[str, str]:
         result = await self.session.execute(
-            select(ApiKeyModel).where(
-                ApiKeyModel.id == api_key_id,
-                ApiKeyModel.organization_id == self.current_admin.organization_id,
+            select(ApiKey).where(
+                ApiKey.id == api_key_id,
+                ApiKey.organization_id == self.current_admin.organization_id,
             )
         )
         api_key = result.scalar_one_or_none()
@@ -364,53 +364,53 @@ class AdminService:
 
         total_queries = (
             await self.session.execute(
-                select(func.count(QueryAnalyticsModel.id)).where(
-                    QueryAnalyticsModel.organization_id == org_id
+                select(func.count(QueryAnalytics.id)).where(
+                    QueryAnalytics.organization_id == org_id
                 )
             )
         ).scalar() or 0
 
         avg_response_time = (
             await self.session.execute(
-                select(func.avg(QueryAnalyticsModel.response_time_ms)).where(
-                    QueryAnalyticsModel.organization_id == org_id
+                select(func.avg(QueryAnalytics.response_time_ms)).where(
+                    QueryAnalytics.organization_id == org_id
                 )
             )
         ).scalar() or 0.0
 
         total_users = (
             await self.session.execute(
-                select(func.count(UserModel.id)).where(
-                    UserModel.organization_id == org_id,
-                    UserModel.is_active == True,  # noqa: E712 - SA col compare
+                select(func.count(User.id)).where(
+                    User.organization_id == org_id,
+                    User.is_active == True,  # noqa: E712 - SA col compare
                 )
             )
         ).scalar() or 0
 
         queries_24h = (
             await self.session.execute(
-                select(func.count(QueryAnalyticsModel.id)).where(
-                    QueryAnalyticsModel.organization_id == org_id,
-                    QueryAnalyticsModel.created_at >= now - timedelta(hours=24),
+                select(func.count(QueryAnalytics.id)).where(
+                    QueryAnalytics.organization_id == org_id,
+                    QueryAnalytics.created_at >= now - timedelta(hours=24),
                 )
             )
         ).scalar() or 0
 
         avg_feedback = (
             await self.session.execute(
-                select(func.avg(QueryAnalyticsModel.feedback_score)).where(
-                    QueryAnalyticsModel.organization_id == org_id,
-                    QueryAnalyticsModel.feedback_score.isnot(None),
+                select(func.avg(QueryAnalytics.feedback_score)).where(
+                    QueryAnalytics.organization_id == org_id,
+                    QueryAnalytics.feedback_score.isnot(None),
                 )
             )
         ).scalar()
 
         # Peak usage hour (0-23) — group by an SQLAlchemy expression, not a string.
-        hour_col = func.extract("hour", QueryAnalyticsModel.created_at).label("hour")
-        count_col = func.count(QueryAnalyticsModel.id).label("count")
+        hour_col = func.extract("hour", QueryAnalytics.created_at).label("hour")
+        count_col = func.count(QueryAnalytics.id).label("count")
         peak_hour_result = await self.session.execute(
             select(hour_col, count_col)
-            .where(QueryAnalyticsModel.organization_id == org_id)
+            .where(QueryAnalytics.organization_id == org_id)
             .group_by(hour_col)
             .order_by(desc(count_col))
             .limit(1)
@@ -421,16 +421,16 @@ class AdminService:
         # Top users
         top_users_result = await self.session.execute(
             select(
-                UserModel.id,
-                UserModel.email,
-                func.count(QueryAnalyticsModel.id).label("query_count"),
-                func.avg(QueryAnalyticsModel.response_time_ms).label("avg_time"),
-                func.max(QueryAnalyticsModel.created_at).label("last_query"),
+                User.id,
+                User.email,
+                func.count(QueryAnalytics.id).label("query_count"),
+                func.avg(QueryAnalytics.response_time_ms).label("avg_time"),
+                func.max(QueryAnalytics.created_at).label("last_query"),
             )
-            .join(QueryAnalyticsModel)
-            .where(UserModel.organization_id == org_id)
-            .group_by(UserModel.id, UserModel.email)
-            .order_by(desc(func.count(QueryAnalyticsModel.id)))
+            .join(QueryAnalytics)
+            .where(User.organization_id == org_id)
+            .group_by(User.id, User.email)
+            .order_by(desc(func.count(QueryAnalytics.id)))
             .limit(10)
         )
 
@@ -446,17 +446,17 @@ class AdminService:
         ]
 
         # Usage trend by date
-        date_col = func.date(QueryAnalyticsModel.created_at).label("date")
+        date_col = func.date(QueryAnalytics.created_at).label("date")
         usage_trend_result = await self.session.execute(
             select(
                 date_col,
-                func.count(QueryAnalyticsModel.id).label("query_count"),
-                func.count(func.distinct(QueryAnalyticsModel.user_id)).label("unique_users"),
-                func.avg(QueryAnalyticsModel.response_time_ms).label("avg_time"),
+                func.count(QueryAnalytics.id).label("query_count"),
+                func.count(func.distinct(QueryAnalytics.user_id)).label("unique_users"),
+                func.avg(QueryAnalytics.response_time_ms).label("avg_time"),
             )
             .where(
-                QueryAnalyticsModel.organization_id == org_id,
-                QueryAnalyticsModel.created_at >= start_date,
+                QueryAnalytics.organization_id == org_id,
+                QueryAnalytics.created_at >= start_date,
             )
             .group_by(date_col)
             .order_by(date_col)
@@ -491,7 +491,7 @@ class AdminService:
         self, user_id: int, limits: RateLimitUpdate
     ) -> Dict[str, Any]:
         user_result = await self.session.execute(
-            select(UserModel).where(UserModel.id == user_id)
+            select(User).where(User.id == user_id)
         )
         user = user_result.scalar_one_or_none()
 
@@ -501,12 +501,12 @@ class AdminService:
             )
 
         rl_result = await self.session.execute(
-            select(RateLimitModel).where(RateLimitModel.user_id == user_id)
+            select(RateLimit).where(RateLimit.user_id == user_id)
         )
         rate_limit = rl_result.scalar_one_or_none()
 
         if not rate_limit:
-            rate_limit = RateLimitModel(
+            rate_limit = RateLimit(
                 user_id=user_id,
                 organization_id=user.organization_id,
             )

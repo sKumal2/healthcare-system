@@ -9,7 +9,8 @@ from typing import Optional
 from datetime import datetime
 
 from app.services.admin_service import AdminService
-from app.models.database import UserModel, RoleEnum
+from app.models.database import User
+from app.models.enums import RoleEnum
 from app.models.admin_schemas import (
     UserCreate, UserUpdate, UserResponse, AuditLogFilters,
     AuditLogResponse, ApiKeyCreate, RateLimitUpdate, PaginationParams
@@ -28,7 +29,7 @@ def get_db():
     pass
 
 
-def require_admin(current_user: UserModel = Depends(get_current_user)) -> UserModel:
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
     """Verify current user is admin."""
     if current_user.role != RoleEnum.ADMIN:
         raise HTTPException(
@@ -40,7 +41,7 @@ def require_admin(current_user: UserModel = Depends(get_current_user)) -> UserMo
 
 def get_admin_service(
     db: Session = Depends(get_db),
-    admin: UserModel = Depends(require_admin)
+    admin: User = Depends(require_admin)
 ) -> AdminService:
     """Get admin service instance."""
     return AdminService(session=db, current_admin=admin)
@@ -302,7 +303,7 @@ async def update_rate_limits(
 # ============ HEALTH CHECK ============
 
 @router.get("/health", response_model=dict)
-async def admin_health(admin: UserModel = Depends(require_admin)):
+async def admin_health(admin: User = Depends(require_admin)):
     """
     Health check endpoint (admin only).
     
