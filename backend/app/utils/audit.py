@@ -14,7 +14,8 @@ from typing import Any, Dict, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import AuditLogModel, RoleEnum, UserModel
+from app.models.database import AuditLog, User
+from app.models.enums import RoleEnum
 
 UTC = timezone.utc
 
@@ -23,23 +24,23 @@ logger = logging.getLogger("audit")
 
 async def create_audit_log(
     session: AsyncSession,
-    user_id: int,
-    organization_id: int,
+    user_id,
+    organization_id,
     action: str,
     resource_type: str,
-    resource_id: Optional[int] = None,
+    resource_id=None,
     changes: Optional[Dict[str, Any]] = None,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
     status: str = "SUCCESS",
     error_message: Optional[str] = None,
-) -> AuditLogModel:
+) -> AuditLog:
     """Add an audit log row to the session. The caller is responsible for commit.
 
     Utility helpers must never commit on their own — doing so breaks the
     atomicity of any wrapping transaction the caller has set up.
     """
-    audit_log = AuditLogModel(
+    audit_log = AuditLog(
         user_id=user_id,
         organization_id=organization_id,
         action=action,
@@ -106,8 +107,8 @@ def extract_before_after(
 
 
 def check_privilege_escalation(
-    current_user: UserModel,
-    target_user_id: int,
+    current_user: User,
+    target_user_id,
     new_role: Optional[RoleEnum] = None,
 ) -> bool:
     """Detect attempts to modify one's own role."""
@@ -116,21 +117,21 @@ def check_privilege_escalation(
     return False
 
 
-def is_admin(user: UserModel) -> bool:
+def is_admin(user: User) -> bool:
     """Check if user has admin role."""
     return user.role == RoleEnum.ADMIN
 
 
 async def safe_log_action(
     session: AsyncSession,
-    user_id: int,
-    organization_id: int,
+    user_id,
+    organization_id,
     action: str,
     resource_type: str,
-    resource_id: Optional[int] = None,
+    resource_id=None,
     changes: Optional[Dict[str, Any]] = None,
     **kwargs,
-) -> Optional[AuditLogModel]:
+) -> Optional[AuditLog]:
     """Safely create an audit log entry, swallowing exceptions.
 
     Logs failures via the audit logger without exposing the exception text,

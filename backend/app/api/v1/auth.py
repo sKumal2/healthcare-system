@@ -70,14 +70,14 @@ def _lookup_user(db: Session, username: str):
     `username` field as an email.
     """
     try:
-        from app.models.database import UserModel
+        from app.models.database import User
     except Exception:  # noqa: BLE001
         return None
-    user = db.query(UserModel).filter(UserModel.email == username).first()
+    user = db.query(User).filter(User.email == username).first()
     if user is None:
         return None
     role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
-    return str(user.id), role_value, user.hashed_password, bool(user.is_active)
+    return str(user.id), role_value, user.password_hash, bool(user.is_active)
 
 
 @router.post("/login", response_model=TokenPair)
