@@ -52,10 +52,16 @@ class Settings(BaseSettings):
     ADMIN_IP_ALLOWLIST: str = ""  # comma-separated CIDRs, empty = disabled
 
     # ----- Vector DB -----
-    VECTOR_DB_PROVIDER: str = "pinecone"  # "pinecone" | "weaviate"
+    VECTOR_DB_PROVIDER: str = "pinecone"  # "pinecone" | "weaviate" | "local"
     PINECONE_API_KEY: str = ""
     PINECONE_INDEX_NAME: str = "healthcare-rag"
     WEAVIATE_URL: str = "http://localhost:8080"
+
+    # ----- Object Storage (AWS S3) -----
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "us-east-1"
+    S3_BUCKET_NAME: str = ""
 
     # ----- LLM -----
     ANTHROPIC_API_KEY: str = ""

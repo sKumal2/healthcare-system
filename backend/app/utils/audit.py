@@ -3,16 +3,26 @@ Utility functions for the admin service.
 Includes audit logging, data masking, and permission checking.
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from datetime import datetime
-from sqlalchemy.orm import Session
-from app.models.database import AuditLogModel, UserModel, RoleEnum
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.database import AuditLogModel, RoleEnum, UserModel
+
+UTC = timezone.utc
+
+logger = logging.getLogger("audit")
 
 
-def create_audit_log(
-    session: Session,
+async def create_audit_log(
+    session: AsyncSession,
     user_id: int,
     organization_id: int,
     action: str,
@@ -24,24 +34,10 @@ def create_audit_log(
     status: str = "SUCCESS",
     error_message: Optional[str] = None,
 ) -> AuditLogModel:
-    """
-    Create an audit log entry for tracking admin actions.
-    
-    Args:
-        session: Database session
-        user_id: ID of admin performing the action
-        organization_id: Organization where action occurred
-        action: Action type (e.g., "USER_CREATED", "ROLE_UPDATED")
-        resource_type: Type of resource affected (e.g., "USER", "API_KEY")
-        resource_id: ID of affected resource
-        changes: Dict of changes (before/after values)
-        ip_address: Client IP address
-        user_agent: Client user agent
-        status: SUCCESS or FAILURE
-        error_message: Error message if status is FAILURE
-    
-    Returns:
-        AuditLogModel instance
+    """Add an audit log row to the session. The caller is responsible for commit.
+
+    Utility helpers must never commit on their own — doing so breaks the
+    atomicity of any wrapping transaction the caller has set up.
     """
     audit_log = AuditLogModel(
         user_id=user_id,
@@ -56,80 +52,56 @@ def create_audit_log(
         error_message=error_message,
     )
     session.add(audit_log)
-    session.commit()
     return audit_log
 
 
 def mask_sensitive_data(data: str, pattern: str = "default") -> str:
-    """
-    Mask sensitive data like API keys, passwords, emails.
-    
-    Args:
-        data: Data to mask
-        pattern: Type of pattern (default, email, api_key, password)
-    
-    Returns:
-        Masked string
-    """
+    """Mask sensitive data like API keys, passwords, emails."""
     if not data:
         return data
-    
+
     if pattern == "email":
-        # Mask: user@example.com -> u***@example.com
         match = re.match(r"(.)(.*?)(@.*)", data)
         if match:
             return f"{match.group(1)}***{match.group(3)}"
-    
+
     elif pattern == "api_key":
-        # Mask: api_key_abcd1234 -> api_key_****
         if len(data) > 8:
             return f"{data[:8]}****"
-    
+
     elif pattern == "password":
-        # Mask: password -> ****
         return "****"
-    
-    # Default: show first and last character
+
     if len(data) > 2:
         return f"{data[0]}***{data[-1]}"
     return "****"
 
 
-def extract_before_after(old_data: Dict[str, Any], new_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """
-    Extract before/after values from two data dictionaries.
-    Automatically masks sensitive fields.
-    
-    Args:
-        old_data: Old values
-        new_data: New values
-    
-    Returns:
-        Dict with 'before' and 'after' keys
-    """
+def extract_before_after(
+    old_data: Dict[str, Any], new_data: Dict[str, Any]
+) -> Dict[str, Dict[str, Any]]:
+    """Extract before/after values, automatically masking sensitive fields."""
     sensitive_fields = {"password", "hashed_password", "key", "key_hash", "token"}
-    
-    before = {}
-    after = {}
-    
-    # Get all keys from both dicts
+
+    before: Dict[str, Any] = {}
+    after: Dict[str, Any] = {}
+
     all_keys = set(old_data.keys()) | set(new_data.keys())
-    
+
     for key in all_keys:
         old_val = old_data.get(key)
         new_val = new_data.get(key)
-        
+
         if old_val == new_val:
             continue
-        
-        # Mask sensitive fields
+
         if key in sensitive_fields:
             before[key] = mask_sensitive_data(str(old_val), "password") if old_val else None
             after[key] = mask_sensitive_data(str(new_val), "password") if new_val else None
         else:
             before[key] = old_val
             after[key] = new_val
-    
+
     return {"before": before, "after": after}
 
 
@@ -138,24 +110,9 @@ def check_privilege_escalation(
     target_user_id: int,
     new_role: Optional[RoleEnum] = None,
 ) -> bool:
-    """
-    Check if an admin is attempting privilege escalation.
-    Rules:
-    - Admin cannot remove themselves from admin role
-    - Admin cannot modify another admin unless authorized
-    
-    Args:
-        current_user: Admin user making the change
-        target_user_id: User being modified
-        new_role: New role being assigned
-    
-    Returns:
-        True if escalation detected, False otherwise
-    """
-    # Cannot modify own role
+    """Detect attempts to modify one's own role."""
     if current_user.id == target_user_id and new_role and new_role != current_user.role:
         return True
-    
     return False
 
 
@@ -164,8 +121,8 @@ def is_admin(user: UserModel) -> bool:
     return user.role == RoleEnum.ADMIN
 
 
-def safe_log_action(
-    session: Session,
+async def safe_log_action(
+    session: AsyncSession,
     user_id: int,
     organization_id: int,
     action: str,
@@ -174,25 +131,13 @@ def safe_log_action(
     changes: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> Optional[AuditLogModel]:
-    """
-    Safely create audit log with exception handling.
-    Does not raise exceptions to avoid breaking the main flow.
-    
-    Args:
-        session: Database session
-        user_id: Admin user ID
-        organization_id: Organization ID
-        action: Action type
-        resource_type: Resource type
-        resource_id: Resource ID
-        changes: Changes dict
-        **kwargs: Additional audit log arguments
-    
-    Returns:
-        AuditLogModel if successful, None otherwise
+    """Safely create an audit log entry, swallowing exceptions.
+
+    Logs failures via the audit logger without exposing the exception text,
+    which can carry PHI / query parameters.
     """
     try:
-        return create_audit_log(
+        return await create_audit_log(
             session=session,
             user_id=user_id,
             organization_id=organization_id,
@@ -202,27 +147,27 @@ def safe_log_action(
             changes=changes,
             **kwargs,
         )
-    except Exception as e:
-        # Log to monitoring system
-        print(f"Audit log creation failed: {str(e)}")
+    except Exception:
+        logger.error("Audit log creation failed", exc_info=True)
         return None
 
 
-def paginate_query(query, page: int = 1, page_size: int = 20):
+async def paginate_query(
+    session: AsyncSession, query, page: int = 1, page_size: int = 20
+):
+    """Paginate an async SQLAlchemy ``select()`` statement.
+
+    Returns ``(items, total, page, page_size, total_pages)``.
     """
-    Paginate a SQLAlchemy query.
-    
-    Args:
-        query: SQLAlchemy query
-        page: Page number (1-indexed)
-        page_size: Records per page
-    
-    Returns:
-        Tuple of (items, total, page, page_size, total_pages)
-    """
-    total = query.count()
+    total_result = await session.execute(
+        select(func.count()).select_from(query.subquery())
+    )
+    total = total_result.scalar() or 0
     total_pages = (total + page_size - 1) // page_size
-    
-    items = query.offset((page - 1) * page_size).limit(page_size).all()
-    
+
+    result = await session.execute(
+        query.offset((page - 1) * page_size).limit(page_size)
+    )
+    items = result.scalars().all()
+
     return items, total, page, page_size, total_pages

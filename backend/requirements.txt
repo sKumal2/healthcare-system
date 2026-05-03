@@ -8,6 +8,7 @@ python-multipart==0.0.6
 sqlalchemy==2.0.25
 alembic==1.13.1
 psycopg2-binary==2.9.9
+asyncpg>=0.29.0        # async Postgres driver for SQLAlchemy AsyncSession
 
 # Validation
 pydantic==2.5.3
@@ -32,6 +33,8 @@ python-dateutil==2.8.2
 
 # AWS
 boto3==1.34.34
+aioboto3>=12.3.0       # async S3 uploads
+aiofiles>=23.2.0       # async local file writes
 
 # RAG Engine
 anthropic>=0.25.0
