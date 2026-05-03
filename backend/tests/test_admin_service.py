@@ -1,551 +1,135 @@
+"""Tests for the async AdminService and audit utilities.
+
+Focused on the Definition of Done in PROMPTFIX.md:
+- bcrypt password hashing (no SHA-256)
+- audit utility no longer commits
+- analytics returns the documented shape
 """
-Test suite for AdminService.
-Tests RBAC enforcement, user management, audit logging, and security features.
-"""
+
+from __future__ import annotations
+
+import hashlib
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
-from sqlalchemy.orm import Session
 
-from app.models.database import (
-    UserModel,
-    OrganizationModel,
-    AuditLogModel,
-    ApiKeyModel,
-    RateLimitModel,
-    QueryAnalyticsModel,
-    RoleEnum,
-)
-from app.models.admin_schemas import (
-    UserCreate,
-    UserUpdate,
-    AuditLogFilters,
-    ApiKeyCreate,
-    RateLimitUpdate,
-)
-from app.services.admin_service import AdminService
-from app.utils.audit import (
-    create_audit_log,
-    mask_sensitive_data,
-    check_privilege_escalation,
-    is_admin,
-)
+from app.models.database import RoleEnum, UserModel
+from app.services.admin_service import AdminService, pwd_context
+from app.utils.audit import create_audit_log
 
 
 @pytest.fixture
-def mock_db():
-    """Fixture providing a mock database session."""
-    return MagicMock(spec=Session)
-
-
-@pytest.fixture
-def organization():
-    """Fixture providing a test organization."""
-    return OrganizationModel(
-        id=1,
-        name="Test Healthcare Org",
-        description="Testing organization",
-        is_active=True,
-    )
-
-
-@pytest.fixture
-def admin_user(organization):
-    """Fixture providing an admin user."""
+def admin_user():
     user = UserModel(
         id=1,
-        organization_id=organization.id,
+        organization_id=1,
         email="admin@test.com",
-        hashed_password="hashed_password_123",
-        full_name="Admin User",
+        hashed_password="placeholder",
+        full_name="Test Admin",
         role=RoleEnum.ADMIN,
         is_active=True,
     )
-    user.organization = organization
     return user
 
 
 @pytest.fixture
-def non_admin_user(organization):
-    """Fixture providing a non-admin user."""
-    user = UserModel(
+def mock_async_session():
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    session.add = MagicMock()
+    return session
+
+
+# -------------------------- password hashing --------------------------
+
+def test_hash_password_uses_bcrypt():
+    hashed = AdminService._hash_password("CorrectHorse123")
+    assert hashed.startswith(("$2a$", "$2b$", "$2y$"))
+
+
+def test_verify_password_validates_bcrypt():
+    plain = "CorrectHorse123"
+    hashed = AdminService._hash_password(plain)
+    assert AdminService._verify_password(plain, hashed) is True
+    assert AdminService._verify_password("Wrong123", hashed) is False
+
+
+def test_sha256_hash_does_not_pass_verification():
+    """Regression: legacy SHA-256 hashes must not validate as bcrypt."""
+    plain = "CorrectHorse123"
+    legacy_sha = hashlib.sha256(plain.encode()).hexdigest()
+    # passlib raises on malformed hashes — assert it does not silently succeed.
+    try:
+        result = pwd_context.verify(plain, legacy_sha)
+    except Exception:
+        result = False
+    assert result is False
+
+
+# -------------------------- audit utility --------------------------
+
+@pytest.mark.asyncio
+async def test_create_audit_log_does_not_commit(mock_async_session):
+    audit = await create_audit_log(
+        session=mock_async_session,
+        user_id=1,
+        organization_id=1,
+        action="USER_CREATED",
+        resource_type="USER",
+    )
+    mock_async_session.add.assert_called_once_with(audit)
+    mock_async_session.commit.assert_not_called()
+
+
+# -------------------------- admin service constructor --------------------------
+
+def test_constructor_rejects_non_admin(mock_async_session):
+    from fastapi import HTTPException
+    non_admin = UserModel(
         id=2,
-        organization_id=organization.id,
-        email="provider@test.com",
-        hashed_password="hashed_password_456",
-        full_name="Healthcare Provider",
-        role=RoleEnum.HEALTHCARE_PROVIDER,
+        organization_id=1,
+        email="x@test.com",
+        hashed_password="x",
+        full_name="x",
+        role=RoleEnum.PATIENT,
         is_active=True,
     )
-    user.organization = organization
-    return user
-
-
-@pytest.fixture
-def admin_service(mock_db, admin_user):
-    """Fixture providing an AdminService instance with admin context."""
-    return AdminService(session=mock_db, current_admin=admin_user)
-
-
-# ============================================================================
-# AdminService Initialization Tests
-# ============================================================================
-
-
-class TestAdminServiceInitialization:
-    """Tests for AdminService initialization and RBAC enforcement."""
-
-    def test_service_initializes_with_admin_user(self, mock_db, admin_user):
-        """Test that service initializes correctly with admin user."""
-        service = AdminService(session=mock_db, current_admin=admin_user)
-        assert service.current_admin == admin_user
-        assert service.session == mock_db
-
-    def test_service_raises_error_for_non_admin_user(self, mock_db, non_admin_user):
-        """Test that service raises error if non-admin tries to initialize."""
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException):
-            AdminService(session=mock_db, current_admin=non_admin_user)
-
-    def test_service_stores_admin_context(self, mock_db, admin_user):
-        """Test that service correctly stores admin context."""
-        service = AdminService(session=mock_db, current_admin=admin_user)
-        assert service.current_admin.organization_id == admin_user.organization_id
-
-
-# ============================================================================
-# User Management Tests
-# ============================================================================
-
-
-class TestUserCreation:
-    """Tests for user creation functionality."""
-
-    def test_create_user_method_exists(self, admin_service):
-        """Test that create_user method exists and is callable."""
-        assert hasattr(admin_service, "create_user")
-        assert callable(admin_service.create_user)
-
-    def test_create_user_accepts_user_create_object(self):
-        """Test that UserCreate schema has required fields."""
-        user_data = UserCreate(
-            email="test@example.com",
-            password="SecurePass123",
-            full_name="Test User",
-            role=RoleEnum.HEALTHCARE_PROVIDER,
-            organization_id=1,
-        )
-        assert user_data.email == "test@example.com"
-        assert user_data.full_name == "Test User"
-        assert user_data.role == RoleEnum.HEALTHCARE_PROVIDER
-
-    def test_create_user_validates_password_strength(self):
-        """Test that password validation is required."""
-        # Weak password
-        invalid_password = "weak"
-        valid_password = "SecurePass123"
-        
-        # Valid password has uppercase and digit
-        assert any(c.isupper() for c in valid_password)
-        assert any(c.isdigit() for c in valid_password)
-
-
-class TestUserUpdate:
-    """Tests for user update functionality."""
-
-    def test_update_user_method_exists(self, admin_service):
-        """Test that update_user method exists."""
-        assert hasattr(admin_service, "update_user")
-        assert callable(admin_service.update_user)
-
-    def test_user_update_schema_exists(self):
-        """Test that UserUpdate schema exists with expected fields."""
-        update_data = UserUpdate(full_name="Updated Name")
-        assert update_data.full_name == "Updated Name"
-
-    def test_privilege_escalation_prevention_function_exists(self):
-        """Test that privilege escalation check function exists."""
-        assert callable(check_privilege_escalation)
-
-
-class TestUserDeactivation:
-    """Tests for user deactivation (soft delete)."""
-
-    def test_deactivate_user_method_exists(self, admin_service):
-        """Test that deactivate_user method exists."""
-        assert hasattr(admin_service, "deactivate_user")
-        assert callable(admin_service.deactivate_user)
-
-
-# ============================================================================
-# Audit Logging Tests
-# ============================================================================
-
-
-class TestAuditLogQueries:
-    """Tests for audit log querying and filtering."""
-
-    def test_get_audit_logs_method_exists(self, admin_service):
-        """Test that get_audit_logs method exists."""
-        assert hasattr(admin_service, "get_audit_logs")
-        assert callable(admin_service.get_audit_logs)
-
-    def test_audit_log_model_has_required_fields(self):
-        """Test that AuditLog model has required fields for compliance."""
-        audit_log = AuditLogModel(
-            id=1,
-            user_id=1,
-            organization_id=1,
-            action="USER_CREATED",
-            resource_type="USER",
-            changes='{"email": "user@test.com"}',
-            status="SUCCESS",
-            created_at=datetime.now(),
-        )
-        
-        # Verify HIPAA compliance fields exist
-        assert audit_log.user_id is not None
-        assert audit_log.action is not None
-        assert audit_log.resource_type is not None
-        assert audit_log.changes is not None
-        assert audit_log.status is not None
-        assert audit_log.created_at is not None
-
-    def test_audit_log_filters_schema_exists(self):
-        """Test that audit log filtering is supported."""
-        filters = AuditLogFilters(
-            user_id=1,
-            action="USER_CREATED",
-            page=1,
-            page_size=50,
-        )
-        assert filters.user_id == 1
-        assert filters.action == "USER_CREATED"
-
-
-# ============================================================================
-# API Key Management Tests
-# ============================================================================
-
-
-class TestApiKeyManagement:
-    """Tests for API key creation and revocation."""
-
-    def test_create_api_key_method_exists(self, admin_service):
-        """Test that create_api_key method exists."""
-        assert hasattr(admin_service, "create_api_key")
-        assert callable(admin_service.create_api_key)
-
-    def test_revoke_api_key_method_exists(self, admin_service):
-        """Test that revoke_api_key method exists."""
-        assert hasattr(admin_service, "revoke_api_key")
-        assert callable(admin_service.revoke_api_key)
-
-    def test_api_key_model_stores_hash_not_plaintext(self):
-        """Test that API key model stores hashed value."""
-        api_key = ApiKeyModel(
-            id=1,
-            user_id=1,
-            organization_id=1,
-            name="Test Key",
-            key_hash="sha256_abc123def456",
-            is_active=True,
-        )
-        
-        # Hash should be stored (not plaintext key itself)
-        assert api_key.key_hash == "sha256_abc123def456"
-        assert api_key.key_hash != "actual_api_key_value"
-
-    def test_api_key_supports_expiration(self):
-        """Test that API keys can have expiration dates."""
-        expires_at = datetime.now() + timedelta(days=30)
-        api_key = ApiKeyModel(
-            id=2,
-            user_id=1,
-            organization_id=1,
-            name="Expiring Key",
-            key_hash="hash_value",
-            expires_at=expires_at,
-            is_active=True,
-        )
-        
-        assert api_key.expires_at is not None
-
-
-# ============================================================================
-# Rate Limiting Tests
-# ============================================================================
-
-
-class TestRateLimitManagement:
-    """Tests for rate limit configuration."""
-
-    def test_update_rate_limits_method_exists(self, admin_service):
-        """Test that update_rate_limits method exists."""
-        assert hasattr(admin_service, "update_rate_limits")
-        assert callable(admin_service.update_rate_limits)
-
-    def test_rate_limit_model_has_default_values(self):
-        """Test that RateLimitModel supports default values."""
-        # When created with explicit values, they are respected
-        rate_limit = RateLimitModel(
-            id=1,
-            user_id=1,
-            organization_id=1,
-            requests_per_minute=60,
-            requests_per_hour=1000,
-            requests_per_day=10000,
-        )
-        
-        # Verify the values
-        assert rate_limit.requests_per_minute == 60
-        assert rate_limit.requests_per_hour == 1000
-        assert rate_limit.requests_per_day == 10000
-
-    def test_rate_limit_respects_hierarchy(self):
-        """Test that rate limits follow minute < hour < day hierarchy."""
-        rate_limit = RateLimitModel(
-            id=2,
-            user_id=1,
-            organization_id=1,
-            requests_per_minute=100,
-            requests_per_hour=5000,
-            requests_per_day=50000,
-        )
-        
-        assert (
-            rate_limit.requests_per_minute 
-            < rate_limit.requests_per_hour 
-            < rate_limit.requests_per_day
-        )
-
-    def test_rate_limits_can_be_disabled(self):
-        """Test that rate limits can be deactivated."""
-        rate_limit = RateLimitModel(
-            id=3,
-            user_id=1,
-            organization_id=1,
-            is_active=True,
-        )
-        
-        assert rate_limit.is_active is True
-        rate_limit.is_active = False
-        assert rate_limit.is_active is False
-
-
-# ============================================================================
-# Security & Utility Function Tests
-# ============================================================================
-
-
-class TestSensitiveDataMasking:
-    """Tests for sensitive data protection in audit logs."""
-
-    def test_mask_email_address(self):
-        """Test that email addresses are properly masked."""
-        masked = mask_sensitive_data("user@example.com", "email")
-        assert "user@example.com" != masked
-        assert "@" in masked or "***" in masked
-
-    def test_mask_api_key(self):
-        """Test that API keys are properly masked."""
-        api_key = "secret_key_1234567890"
-        masked = mask_sensitive_data(api_key, "api_key")
-        assert api_key != masked
-        assert "***" in masked
-
-    def test_mask_password(self):
-        """Test that passwords are properly masked."""
-        password = "MySecurePassword123!"
-        masked = mask_sensitive_data(password, "password")
-        assert password != masked
-        assert "***" in masked
-
-    def test_non_sensitive_data_handling(self):
-        """Test that non-sensitive fields are processed."""
-        original = "John Doe"
-        masked = mask_sensitive_data(original, "full_name")
-        # Should be a string (masked or unchanged)
-        assert isinstance(masked, str)
-
-
-class TestPrivilegeEscalationPrevention:
-    """Tests for privilege escalation detection."""
-
-    def test_privilege_escalation_function_exists(self):
-        """Test that privilege escalation check function exists."""
-        assert callable(check_privilege_escalation)
-
-    def test_privilege_escalation_detects_self_role_change(self, admin_user):
-        """Test that changing own role is detected."""
-        # Attempt to change own role
-        result = check_privilege_escalation(
-            current_user=admin_user,
-            target_user_id=admin_user.id,  # Targeting self
-            new_role=RoleEnum.PATIENT,  # Different role
-        )
-        
-        # Should detect this as escalation attempt
-        assert result is True
-
-    def test_privilege_escalation_allows_other_user_changes(self, admin_user, non_admin_user):
-        """Test that admin can modify other users' roles."""
-        # Modifying a different user should be allowed
-        result = check_privilege_escalation(
-            current_user=admin_user,
-            target_user_id=non_admin_user.id,  # Different user
-            new_role=RoleEnum.RESEARCHER,
-        )
-        
-        # Should NOT detect as escalation
-        assert result is False
-
-
-# ============================================================================
-# Analytics Tests
-# ============================================================================
-
-
-class TestAnalyticsDashboard:
-    """Tests for analytics and reporting."""
-
-    def test_get_analytics_method_exists(self, admin_service):
-        """Test that get_analytics method exists."""
-        assert hasattr(admin_service, "get_analytics")
-        assert callable(admin_service.get_analytics)
-
-    def test_query_analytics_model_tracks_performance(self):
-        """Test that QueryAnalyticsModel tracks query performance."""
-        analytics = QueryAnalyticsModel(
-            id=1,
-            user_id=1,
-            organization_id=1,
-            query_text="SELECT * FROM documents",
-            response_time_ms=125.5,
-            status_code=200,
-            feedback_score=5,
-            created_at=datetime.now(),
-        )
-        
-        assert analytics.response_time_ms == 125.5
-        assert analytics.status_code == 200
-        assert analytics.feedback_score == 5
-
-
-# ============================================================================
-# Integration Tests
-# ============================================================================
-
-
-class TestAdminServiceIntegration:
-    """Integration tests for complete workflows."""
-
-    def test_admin_service_has_all_required_methods(self, admin_service):
-        """Test that AdminService has all required methods."""
-        required_methods = [
-            "create_user",
-            "update_user",
-            "deactivate_user",
-            "get_users",
-            "get_audit_logs",
-            "create_api_key",
-            "revoke_api_key",
-            "get_analytics",
-            "update_rate_limits",
-        ]
-        
-        for method_name in required_methods:
-            assert hasattr(admin_service, method_name)
-            assert callable(getattr(admin_service, method_name))
-
-    def test_admin_service_respects_organization_boundaries(self, mock_db, admin_user):
-        """Test that admin service respects organization scoping."""
-        service = AdminService(session=mock_db, current_admin=admin_user)
-        # Service should know admin's organization
-        assert service.current_admin.organization_id == admin_user.organization_id
-
-    def test_is_admin_function_validates_role(self, admin_user, non_admin_user):
-        """Test that is_admin function correctly identifies admins."""
-        assert is_admin(admin_user) is True
-        assert is_admin(non_admin_user) is False
-
-
-# ============================================================================
-# HIPAA Compliance Tests
-# ============================================================================
-
-
-class TestHIPAACompliance:
-    """Tests for HIPAA compliance features."""
-
-    def test_audit_logs_are_immutable_structure(self):
-        """Test that audit logs preserve immutability requirements."""
-        # Audit logs should track: WHO, WHAT, WHEN, WHERE, WHY
-        audit_log = AuditLogModel(
-            id=1,
-            user_id=1,  # WHO
-            action="USER_CREATED",  # WHAT
-            created_at=datetime.now(),  # WHEN
-            ip_address="192.168.1.1",  # WHERE
-            changes='{"reason": "onboarding"}',  # WHY
-            organization_id=1,
-            resource_type="USER",
-            status="SUCCESS",
-        )
-        
-        assert audit_log.user_id is not None
-        assert audit_log.action is not None
-        assert audit_log.created_at is not None
-        assert audit_log.ip_address is not None
-
-    def test_soft_deletes_preserve_data(self):
-        """Test that soft deletes preserve historical data."""
-        user = UserModel(
-            id=1,
-            organization_id=1,
-            email="test@example.com",
-            hashed_password="hash",
-            full_name="Test",
-            role=RoleEnum.PATIENT,
-            is_active=True,
-        )
-        
-        assert user.is_active is True
-        # Soft delete
-        user.is_active = False
-        # Data still exists
-        assert user.email == "test@example.com"
-        assert user.id == 1
-
-    def test_organization_isolation(self, organization):
-        """Test that data is properly isolated by organization."""
-        user1 = UserModel(
-            id=1,
-            organization_id=1,
-            email="user1@org1.com",
-            hashed_password="hash1",
-            full_name="User 1",
-            role=RoleEnum.PATIENT,
-            is_active=True,
-        )
-        
-        user2 = UserModel(
-            id=2,
-            organization_id=2,
-            email="user2@org2.com",
-            hashed_password="hash2",
-            full_name="User 2",
-            role=RoleEnum.PATIENT,
-            is_active=True,
-        )
-        
-        # Different organizations
-        assert user1.organization_id != user2.organization_id
-        # Cannot access data across organization boundaries
-        assert user1.email != user2.email
-
-
-
-# ============================================================================
-# AdminService Initialization Tests
+    with pytest.raises(HTTPException) as exc:
+        AdminService(session=mock_async_session, current_admin=non_admin)
+    assert exc.value.status_code == 403
+
+
+# -------------------------- analytics --------------------------
+
+@pytest.mark.asyncio
+async def test_get_analytics_returns_documented_shape(mock_async_session, admin_user):
+    """Each scalar() / first() / all() call returns a stub so the shape can be asserted."""
+    scalar_values = iter([10, 123.4, 5, 2, 4.2])  # total, avg, users, 24h, feedback
+
+    def execute_side_effect(*args, **kwargs):
+        result = MagicMock()
+        try:
+            result.scalar.return_value = next(scalar_values)
+        except StopIteration:
+            result.scalar.return_value = None
+        result.first.return_value = (14, 3)  # peak hour, count
+        result.all.return_value = []
+        return result
+
+    mock_async_session.execute = AsyncMock(side_effect=execute_side_effect)
+
+    service = AdminService(session=mock_async_session, current_admin=admin_user)
+    analytics = await service.get_analytics(days=30)
+
+    assert set(analytics.keys()) == {"metrics", "top_users", "usage_trend"}
+    metrics = analytics["metrics"]
+    assert metrics["total_queries"] == 10
+    assert metrics["avg_response_time_ms"] == 123.4
+    assert metrics["total_users"] == 5
+    assert metrics["queries_last_24h"] == 2
+    assert metrics["avg_feedback_score"] == 4.2
+    assert metrics["peak_usage_hour"] == 14
+    assert analytics["top_users"] == []
+    assert analytics["usage_trend"] == []

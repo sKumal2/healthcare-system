@@ -1,24 +1,66 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
-from datetime import datetime
-from pathlib import Path
+"""Document processing and retrieval service.
+
+Embeds chunks with sentence-transformers, persists vectors via
+``VectorDBClient``, and stores raw bytes either in S3 (when AWS credentials
+are configured) or on local disk for dev. All public methods are async.
+
+Note on embeddings: ``sentence-transformers`` runs synchronously on CPU.
+In production this should be replaced with an async embedding API call
+(e.g. OpenAI ``text-embedding-3-small``) so model encoding does not block
+the event loop. For now we offload via ``asyncio.to_thread``.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import hashlib
+import logging
+import re
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, List, Optional
+
+from pydantic import BaseModel, Field
+
+from app.core.config import settings
+from app.db.vector_db import VectorDBClient
+
+UTC = timezone.utc
+
+logger = logging.getLogger(__name__)
+
+
+_embedding_model = None
+EMBEDDING_DIMENSION = 384  # all-MiniLM-L6-v2 default
+
+
+def _get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedding_model
 
 
 class DocumentMetadata(BaseModel):
     """Metadata for document chunks."""
+
     document_id: str
     title: str
     chunk_index: int
     source_url: Optional[str] = None
     author: Optional[str] = None
     file_path: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    organization_id: Optional[str] = None
+    uploaded_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class DocumentChunk(BaseModel):
     """Core document chunk schema."""
+
     id: str
     content: str
     embedding: Optional[List[float]] = None
@@ -27,6 +69,7 @@ class DocumentChunk(BaseModel):
 
 class DocumentSearchResult(BaseModel):
     """Search result returned from document search."""
+
     id: str
     content: str
     similarity_score: float
@@ -35,199 +78,181 @@ class DocumentSearchResult(BaseModel):
 
 class DocumentService:
     """Service layer for document processing and retrieval."""
-    
-    def __init__(self):
-        # Mock vector database storage
-        self.vector_store: List[DocumentChunk] = []
-        self.document_index: dict = {}
-        
-        # Set up storage directory
+
+    def __init__(self, vector_db: VectorDBClient):
+        self.vector_db = vector_db
         self.storage_dir = Path(__file__).parent.parent / "storage" / "uploads"
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    # ---------- internal helpers ----------
+
     def _generate_chunk_id(self, document_id: str, chunk_index: int) -> str:
-        """Generate unique ID for document chunk."""
-        hash_input = f"{document_id}_{chunk_index}_{datetime.utcnow().isoformat()}"
+        hash_input = f"{document_id}_{chunk_index}_{datetime.now(UTC).isoformat()}"
         return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
-    
-    def _generate_mock_embedding(self, text: str) -> List[float]:
-        """Generate mock embedding vector from text."""
-        # Simple hash-based mock embedding (384-dimensional)
-        hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
-        return [(hash_val >> i) % 100 / 100.0 for i in range(384)]
-    
+
+    async def _generate_embedding(self, text: str) -> List[float]:
+        """Encode ``text`` to an embedding vector.
+
+        Encoding is CPU-bound and synchronous, so it runs in a thread to
+        avoid blocking the event loop. In production, swap this for an
+        async embedding API call.
+        """
+
+        def _encode() -> List[float]:
+            model = _get_embedding_model()
+            return model.encode(text).tolist()
+
+        return await asyncio.to_thread(_encode)
+
     def _split_into_chunks(self, text: str, chunk_size: int = 500) -> List[str]:
-        """Split document text into chunks."""
-        chunks = []
-        words = text.split()
-        current_chunk = []
+        """Split text into chunks on sentence boundaries first."""
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        chunks: List[str] = []
+        current_chunk: List[str] = []
         current_length = 0
-        
-        for word in words:
-            current_chunk.append(word)
-            current_length += len(word) + 1
-            
-            if current_length >= chunk_size:
+
+        for sentence in sentences:
+            if current_length + len(sentence) > chunk_size and current_chunk:
                 chunks.append(" ".join(current_chunk))
-                current_chunk = []
-                current_length = 0
-        
+                current_chunk = [sentence]
+                current_length = len(sentence)
+            else:
+                current_chunk.append(sentence)
+                current_length += len(sentence) + 1
+
         if current_chunk:
             chunks.append(" ".join(current_chunk))
-        
-        return chunks
-    
-    def _compute_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Compute cosine similarity between two vectors."""
-        if not vec1 or not vec2:
-            return 0.0
-        
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a ** 2 for a in vec1) ** 0.5
-        norm2 = sum(b ** 2 for b in vec2) ** 0.5
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        return dot_product / (norm1 * norm2)
-    
-    def _save_file(self, filename: str, file_content: bytes) -> str:
+
+        return chunks if chunks else [text]
+
+    async def _save_file(self, filename: str, file_content: bytes) -> str:
+        """Persist ``file_content``. Uses S3 when AWS credentials are
+        configured, otherwise writes to the local upload directory.
         """
-        Save file to storage/uploads directory with collision handling.
-        
-        Args:
-            filename: Original filename
-            file_content: Raw file content as bytes
-        
-        Returns:
-            Relative path to saved file
-        """
+        if settings.AWS_ACCESS_KEY_ID and settings.S3_BUCKET_NAME:
+            import aioboto3  # type: ignore
+
+            session = aioboto3.Session()
+            async with session.client("s3", region_name=settings.AWS_REGION) as s3:
+                key = f"uploads/{uuid.uuid4().hex}/{filename}"
+                await s3.put_object(
+                    Bucket=settings.S3_BUCKET_NAME,
+                    Key=key,
+                    Body=file_content,
+                    ContentType="application/octet-stream",
+                )
+                return f"s3://{settings.S3_BUCKET_NAME}/{key}"
+
         file_path = self.storage_dir / filename
-        
-        # Handle filename collisions by appending UUID
         if file_path.exists():
             name_parts = filename.rsplit(".", 1)
             if len(name_parts) == 2:
-                base_name, extension = name_parts
-                filename = f"{base_name}_{uuid.uuid4().hex[:8]}.{extension}"
+                base, ext = name_parts
+                filename = f"{base}_{uuid.uuid4().hex[:8]}.{ext}"
             else:
                 filename = f"{filename}_{uuid.uuid4().hex[:8]}"
             file_path = self.storage_dir / filename
-        
-        # Write file to disk
-        with open(file_path, "wb") as f:
-            f.write(file_content)
-        
-        # Return relative path
+
+        import aiofiles  # type: ignore
+
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(file_content)
         return f"storage/uploads/{filename}"
-    
-    def process_and_store(
+
+    # ---------- public API ----------
+
+    async def process_and_store(
         self,
         document_text: str,
         metadata: dict,
+        organization_id: str,
+        uploaded_by: str,
         file_content: Optional[bytes] = None,
-        filename: Optional[str] = None
+        filename: Optional[str] = None,
     ) -> dict:
+        """Chunk, embed, and persist a document.
+
+        ``organization_id`` and ``uploaded_by`` are stored on every chunk
+        so the search path can enforce per-org isolation.
         """
-        Process document text into chunks and store with embeddings.
-        
-        Args:
-            document_text: Raw document text to process
-            metadata: Dict with keys: title, document_id, source_url, author
-            file_content: Optional raw file content as bytes to save locally
-            filename: Optional filename for saving the raw file
-        
-        Returns:
-            Dictionary with processing status, chunk IDs, and file path
-        """
-        document_id = metadata.get("document_id")
+        document_id = metadata.get("document_id") or uuid.uuid4().hex
         file_path = None
-        
-        # Save raw file if content and filename provided
+
         if file_content is not None and filename is not None:
-            file_path = self._save_file(filename, file_content)
-        
+            file_path = await self._save_file(filename, file_content)
+
         chunks = self._split_into_chunks(document_text)
-        stored_chunks = []
-        
+        stored_chunks: List[str] = []
+        records: List[dict[str, Any]] = []
+
         for chunk_index, chunk_text in enumerate(chunks):
             chunk_id = self._generate_chunk_id(document_id, chunk_index)
-            embedding = self._generate_mock_embedding(chunk_text)
-            
-            doc_chunk = DocumentChunk(
-                id=chunk_id,
-                content=chunk_text,
-                embedding=embedding,
-                metadata=DocumentMetadata(
-                    document_id=document_id,
-                    title=metadata.get("title", "Untitled"),
-                    chunk_index=chunk_index,
-                    source_url=metadata.get("source_url"),
-                    author=metadata.get("author"),
-                    file_path=file_path
-                )
+            embedding = await self._generate_embedding(chunk_text)
+
+            chunk_metadata = DocumentMetadata(
+                document_id=document_id,
+                title=metadata.get("title", "Untitled"),
+                chunk_index=chunk_index,
+                source_url=metadata.get("source_url"),
+                author=metadata.get("author"),
+                file_path=file_path,
+                organization_id=organization_id,
+                uploaded_by=uploaded_by,
             )
-            
-            # Store in mock vector database
-            self.vector_store.append(doc_chunk)
+
+            records.append(
+                {
+                    "id": chunk_id,
+                    "vector": embedding,
+                    "metadata": {
+                        **chunk_metadata.model_dump(mode="json"),
+                        "content": chunk_text,
+                    },
+                }
+            )
             stored_chunks.append(chunk_id)
-        
-        # Index document for quick lookup
-        self.document_index[document_id] = {
-            "chunk_ids": stored_chunks,
-            "total_chunks": len(chunks),
-            "file_path": file_path,
-            "stored_at": datetime.utcnow().isoformat()
-        }
-        
+
+        await self.vector_db.upsert(records)
+
         return {
             "document_id": document_id,
             "chunks_stored": len(stored_chunks),
             "chunk_ids": stored_chunks,
-            "file_path": file_path
+            "file_path": file_path,
         }
-    
-    def search(
+
+    async def search(
         self,
         query_text: str,
-        top_k: int = 5
+        organization_id: str,
+        top_k: int = 5,
     ) -> List[DocumentSearchResult]:
-        """
-        Search for documents using vector similarity.
-        
-        Args:
-            query_text: Query text to search for
-            top_k: Number of top results to return
-        
-        Returns:
-            List of DocumentSearchResult sorted by similarity score
-        """
-        query_embedding = self._generate_mock_embedding(query_text)
-        scored_results = []
-        
-        for chunk in self.vector_store:
-            if chunk.embedding:
-                similarity = self._compute_similarity(
-                    query_embedding,
-                    chunk.embedding
+        """Search for chunks belonging to ``organization_id`` only."""
+        query_embedding = await self._generate_embedding(query_text)
+        raw_results = await self.vector_db.query(
+            query_embedding,
+            top_k=top_k,
+            filters={"organization_id": organization_id},
+        )
+
+        results: List[DocumentSearchResult] = []
+        for item in raw_results:
+            md = item.get("metadata", {})
+            results.append(
+                DocumentSearchResult(
+                    id=item["id"],
+                    content=item.get("content") or md.get("content", ""),
+                    similarity_score=float(item.get("score", 0.0)),
+                    metadata=DocumentMetadata(
+                        document_id=md.get("document_id", ""),
+                        title=md.get("title", "Untitled"),
+                        chunk_index=md.get("chunk_index", 0),
+                        source_url=md.get("source_url"),
+                        author=md.get("author"),
+                        file_path=md.get("file_path"),
+                        organization_id=md.get("organization_id"),
+                        uploaded_by=md.get("uploaded_by"),
+                    ),
                 )
-                scored_results.append({
-                    "chunk": chunk,
-                    "score": similarity
-                })
-        
-        # Sort by similarity score descending
-        scored_results.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Return top_k results
-        results = [
-            DocumentSearchResult(
-                id=item["chunk"].id,
-                content=item["chunk"].content,
-                similarity_score=item["score"],
-                metadata=item["chunk"].metadata
             )
-            for item in scored_results[:top_k]
-        ]
-        
         return results
