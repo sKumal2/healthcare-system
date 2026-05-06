@@ -56,6 +56,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., min_length=1)
 
 
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=8)
+    full_name: str = Field(..., min_length=2)
+
+
 def _verify_password(plain: str, hashed: str) -> bool:
     try:
         return pwd_context.verify(plain, hashed)
@@ -80,6 +86,52 @@ async def _lookup_user(db: AsyncSession, username: str):
         return None
     role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
     return str(user.id), role_value, user.password_hash, bool(user.is_active)
+
+
+@router.post("/register", response_model=TokenPair, status_code=status.HTTP_201_CREATED)
+async def register(
+    payload: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TokenPair:
+    """Register a new user and return tokens immediately — no email verify for now."""
+    from app.models.database import User, Organization
+    from app.models.enums import RoleEnum
+    from fastapi import HTTPException
+
+    existing = await db.execute(select(User).where(User.email == payload.email.lower()))
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists."
+        )
+
+    org = Organization(
+        name=f"{payload.full_name}'s Organization",
+        email=payload.email.lower(),
+        is_active=True,
+    )
+    db.add(org)
+    await db.flush()
+
+    user = User(
+        email=payload.email.lower().strip(),
+        full_name=payload.full_name.strip(),
+        password_hash=pwd_context.hash(payload.password),
+        role=RoleEnum.PATIENT,
+        organization_id=org.id,
+        is_active=True,
+        is_email_verified=False,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    user_id = str(user.id)
+    role = user.role.value
+    access = create_access_token({"sub": user_id, "role": role})
+    refresh = create_refresh_token(user_id, role=role)
+    await store_refresh_token(user_id, refresh)
+    return TokenPair(access_token=access, refresh_token=refresh)
 
 
 @router.post("/login", response_model=TokenPair)
