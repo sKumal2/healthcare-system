@@ -27,7 +27,11 @@ from app.gateway.exceptions.handlers import gateway_error_to_response
 
 _BODY_METHODS: Iterable[str] = ("POST", "PUT", "PATCH")
 _NO_BODY_METHODS: Iterable[str] = ("GET", "DELETE")
-_ALLOWED_CONTENT_TYPES: tuple[str, ...] = ("application/json", "multipart/form-data")
+_ALLOWED_CONTENT_TYPES: tuple[str, ...] = (
+    "application/json",
+    "multipart/form-data",
+    "application/x-www-form-urlencoded",
+)
 
 
 def _content_type_allowed(value: str | None) -> bool:
@@ -71,7 +75,8 @@ class RequestValidatorMiddleware(BaseHTTPMiddleware):
         if method in _BODY_METHODS:
             if not _content_type_allowed(request.headers.get("content-type")):
                 raise UnsupportedMediaTypeError(
-                    "Content-Type must be application/json or multipart/form-data."
+                    "Content-Type must be application/json, multipart/form-data, "
+                    "or application/x-www-form-urlencoded."
                 )
 
         if method in _NO_BODY_METHODS:
