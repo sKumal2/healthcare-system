@@ -22,6 +22,7 @@ async def ask_question(
     request: QueryRequest,
     service: QueryService = Depends(get_query_service),
     current_user: UserIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Submit a healthcare question and get an answer backed by verified sources.
@@ -32,8 +33,18 @@ async def ask_question(
     3. Re-rank by source authority (CDC, WHO, FDA, etc.)
     4. Generate a cited answer with medical disclaimer
     """
+    import uuid as _uuid
+    from sqlalchemy import select
+
+    from app.models.database import User
+
+    result = await db.execute(select(User).where(User.id == _uuid.UUID(current_user.user_id)))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
     request.user_id = current_user.user_id
-    return await service.ask_question(request)
+    return await service.ask_question(request, organization_id=str(user.organization_id))
 
 
 @router.get("", response_model=dict, summary="List past queries")
