@@ -7,18 +7,21 @@ The retriever already defines a ``VectorDBClient`` *protocol* in
   that the document service calls,
 * a ``LocalVectorDBClient`` fallback that persists vectors to disk so the
   system works in local dev without Pinecone/Weaviate,
+* a ``PineconeVectorDBClient`` backed by the Pinecone serverless API,
 * a FastAPI dependency provider ``get_vector_db_client``.
 
-In production the same interface can be backed by Pinecone / Weaviate by
-swapping the implementation.
+Set ``VECTOR_DB_PROVIDER=pinecone`` (the default) to use Pinecone.
+Set ``VECTOR_DB_PROVIDER=local`` to use the file-backed store.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
+from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -125,28 +128,184 @@ def _matches_filters(metadata: dict[str, Any], filters: dict[str, Any]) -> bool:
     return all(metadata.get(key) == value for key, value in filters.items())
 
 
+def _batched(iterable: Iterable[Any], n: int) -> Iterable[list[Any]]:
+    """Yield successive n-sized chunks from iterable."""
+    it = iter(iterable)
+    while True:
+        batch = list(islice(it, n))
+        if not batch:
+            break
+        yield batch
+
+
+class PineconeVectorDBClient:
+    """Pinecone-backed vector store.
+
+    Reads configuration from environment / settings:
+      - PINECONE_API_KEY    — required
+      - PINECONE_INDEX_NAME — default "healthcare-rag"
+      - PINECONE_CLOUD      — default "aws"
+      - PINECONE_REGION     — default "us-east-1"
+      - PINECONE_DIMENSION  — inferred from first upsert when not set
+    """
+
+    _BATCH_SIZE = 100
+
+    def __init__(self) -> None:
+        from pinecone import Pinecone, ServerlessSpec  # noqa: PLC0415
+
+        self._ServerlessSpec = ServerlessSpec
+        self._api_key = settings.PINECONE_API_KEY
+        self._index_name = settings.PINECONE_INDEX_NAME
+        self._cloud = settings.PINECONE_CLOUD
+        self._region = settings.PINECONE_REGION
+        self._dimension: int | None = (
+            settings.PINECONE_DIMENSION if settings.PINECONE_DIMENSION > 0 else None
+        )
+        self._pc = Pinecone(api_key=self._api_key)
+        self._index = None  # lazy — created on first use
+
+    def _ensure_index(self, dimension: int) -> None:
+        """Create the Pinecone index if it doesn't already exist."""
+        if not self._pc.has_index(self._index_name):
+            logger.info(
+                "Creating Pinecone index '%s' (dim=%d, cloud=%s, region=%s)",
+                self._index_name,
+                dimension,
+                self._cloud,
+                self._region,
+            )
+            self._pc.create_index(
+                name=self._index_name,
+                dimension=dimension,
+                metric="cosine",
+                spec=self._ServerlessSpec(cloud=self._cloud, region=self._region),
+            )
+        if self._index is None:
+            self._index = self._pc.Index(self._index_name)
+
+    def _get_index(self) -> Any:
+        if self._index is None:
+            if not self._pc.has_index(self._index_name):
+                raise RuntimeError(
+                    f"Pinecone index '{self._index_name}' does not exist and no vectors "
+                    "have been upserted yet. Call upsert() first or set PINECONE_DIMENSION."
+                )
+            self._index = self._pc.Index(self._index_name)
+        return self._index
+
+    async def upsert(self, vectors: Iterable[dict[str, Any]]) -> int:
+        """Insert/replace vector records.
+
+        Each record must have ``id``, ``vector`` (list[float]), and ``metadata``.
+        Returns the number of records written.
+        """
+        records = list(vectors)
+        if not records:
+            return 0
+
+        dimension = self._dimension or len(records[0]["vector"])
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._ensure_index, dimension
+        )
+        index = self._get_index()
+
+        pinecone_vectors = [
+            {
+                "id": r["id"],
+                "values": list(r["vector"]),
+                "metadata": dict(r.get("metadata", {})),
+            }
+            for r in records
+        ]
+
+        total = 0
+        for batch in _batched(pinecone_vectors, self._BATCH_SIZE):
+            response = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda b=batch: index.upsert(vectors=b),
+            )
+            total += response.upserted_count
+        return total
+
+    async def query(
+        self,
+        vector: list[float],
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the top-k cosine-similar records, optionally filtered by metadata.
+
+        Each result is ``{"id", "score", "metadata", "content"}``.
+        Returns an empty list when the index has not been created yet.
+        """
+        if self._index is None and not self._pc.has_index(self._index_name):
+            logger.debug(
+                "Pinecone index '%s' does not exist yet; returning empty results.",
+                self._index_name,
+            )
+            return []
+
+        index = self._get_index()
+        pinecone_filter = filters if filters else None
+
+        response = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: index.query(
+                vector=vector,
+                top_k=top_k,
+                filter=pinecone_filter,
+                include_metadata=True,
+            ),
+        )
+
+        return [
+            {
+                "id": match.id,
+                "score": match.score,
+                "metadata": match.metadata or {},
+                "content": (match.metadata or {}).get("content", ""),
+            }
+            for match in response.matches
+        ]
+
+    async def delete(self, ids: Iterable[str]) -> int:
+        """Delete records by ID. Returns the number of IDs submitted for deletion."""
+        ids_list = list(ids)
+        if not ids_list:
+            return 0
+        index = self._get_index()
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: index.delete(ids=ids_list),
+        )
+        return len(ids_list)
+
+
 VectorDBClient = LocalVectorDBClient
 
 
-_singleton: LocalVectorDBClient | None = None
+_singleton: LocalVectorDBClient | PineconeVectorDBClient | None = None
 
 
-def get_vector_db_client() -> VectorDBClient:
+def get_vector_db_client() -> LocalVectorDBClient | PineconeVectorDBClient:
     """FastAPI dependency provider — returns a process-wide singleton.
 
-    For Pinecone/Weaviate, this is the seam to swap the backend. The
-    function signature stays sync because instantiation does not perform
-    I/O until upsert/query is called.
+    Routes to PineconeVectorDBClient when VECTOR_DB_PROVIDER=pinecone (default),
+    or LocalVectorDBClient when VECTOR_DB_PROVIDER=local.
     """
     global _singleton
     if _singleton is None:
         provider = (settings.VECTOR_DB_PROVIDER or "local").lower()
-        if provider != "local":
-            logger.warning(
-                "VECTOR_DB_PROVIDER=%s is not yet implemented; "
-                "falling back to local file-backed store.",
-                provider,
-            )
-        path = os.getenv("VECTOR_DB_LOCAL_PATH")
-        _singleton = LocalVectorDBClient(storage_path=path)
+        if provider == "pinecone":
+            logger.info("Using Pinecone vector DB (index=%s)", settings.PINECONE_INDEX_NAME)
+            _singleton = PineconeVectorDBClient()
+        else:
+            if provider != "local":
+                logger.warning(
+                    "VECTOR_DB_PROVIDER=%s is not supported; falling back to local store.",
+                    provider,
+                )
+            path = os.getenv("VECTOR_DB_LOCAL_PATH")
+            _singleton = LocalVectorDBClient(storage_path=path)
     return _singleton
