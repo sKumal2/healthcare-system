@@ -210,11 +210,23 @@ class PineconeVectorDBClient:
         )
         index = self._get_index()
 
+        # pinecone_vectors = [
+        #     {
+        #         "id": r["id"],
+        #         "values": list(r["vector"]),
+        #         "metadata": dict(r.get("metadata", {})),
+        #     }
+        #     for r in records
+        # ]
+        #updated the pinecone_vector method to handle null value during uploads
         pinecone_vectors = [
             {
                 "id": r["id"],
                 "values": list(r["vector"]),
-                "metadata": dict(r.get("metadata", {})),
+                "metadata": {
+                    k: v for k, v in r.get("metadata", {}).items()
+                    if v is not None
+                },
             }
             for r in records
         ]

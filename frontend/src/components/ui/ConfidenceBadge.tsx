@@ -13,6 +13,14 @@ function getBadgeStyle(score: number): { className: string; label: string } {
 }
 
 export function ConfidenceBadge({ score, showLabel = false }: ConfidenceBadgeProps) {
+  if (!score || isNaN(score)) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-500">
+        Calculating...
+      </span>
+    );
+  }
+
   const { className, label } = getBadgeStyle(score);
   const pct = Math.round(score * 100);
 

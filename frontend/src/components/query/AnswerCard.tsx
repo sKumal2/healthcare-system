@@ -22,14 +22,19 @@ function AnswerSkeleton() {
 }
 
 export function AnswerCard({ result, isLoading }: AnswerCardProps) {
+  const processingTime =
+    result.processing_time_ms && !isNaN(result.processing_time_ms)
+      ? formatProcessingTime(result.processing_time_ms)
+      : null;
+
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-lg font-semibold text-slate-800">Answer</span>
         <ConfidenceBadge score={result.confidence_score} showLabel />
-        <span className="ml-auto text-xs text-slate-400">
-          {formatProcessingTime(result.processing_time_ms)}
-        </span>
+        {processingTime && (
+          <span className="ml-auto text-xs text-slate-400">{processingTime}</span>
+        )}
       </div>
 
       <div className="border-t border-slate-100 my-4" />
