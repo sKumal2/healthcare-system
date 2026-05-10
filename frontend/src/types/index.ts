@@ -32,6 +32,9 @@ export interface Document {
   is_processed: boolean;
   chunks_count: number;
   created_at: string;
+  author?: string;
+  mime_type?: string;
+  file_size_bytes?: number;
 }
 
 export interface ApiError {

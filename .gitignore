@@ -1,5 +1,6 @@
 venv
 PROMPT
+claude.md
 
 # Python
 __pycache__/
@@ -54,4 +55,4 @@ logs/
 # Database
 *.db
 *.sqlite
-*.sqlite3
+*.sqlite
