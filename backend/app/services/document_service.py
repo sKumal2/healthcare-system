@@ -227,12 +227,18 @@ class DocumentService:
         organization_id: str,
         top_k: int = 5,
     ) -> List[DocumentSearchResult]:
-        """Search for chunks belonging to ``organization_id`` only."""
+        """Search for chunks, optionally restricted to ``organization_id``.
+
+        When ``organization_id`` is empty, no filter is applied so the search
+        runs against all vectors. This avoids zero-result responses when
+        callers haven't resolved a tenant yet.
+        """
         query_embedding = await self._generate_embedding(query_text)
+        filters = {"organization_id": organization_id} if organization_id else None
         raw_results = await self.vector_db.query(
             query_embedding,
             top_k=top_k,
-            filters={"organization_id": organization_id},
+            filters=filters,
         )
 
         results: List[DocumentSearchResult] = []

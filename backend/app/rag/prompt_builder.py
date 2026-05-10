@@ -59,7 +59,9 @@ class PromptBuilder:
     def _format_chunk(idx: int, chunk: RankedChunk) -> str:
         return (
             f"[Chunk {idx}]\n"
-            f"Source: {chunk.source_name} ({chunk.source_url})\n"
+            f"Source: {chunk.source_name}"
+            + (f" ({chunk.source_url})" if chunk.source_url else "")
+            + "\n"
             f"Content: {chunk.content}\n"
         )
 

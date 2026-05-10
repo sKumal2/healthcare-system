@@ -21,3 +21,18 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     except Exception:
         db_status = "error"
     return {"status": "ok", "database": db_status}
+
+
+@api_router.get("/health/llm", tags=["Health"])
+async def llm_health():
+    """Report which LLM provider is active and which API keys are configured."""
+    from app.core.config import settings
+
+    provider = (settings.LLM_PROVIDER or "anthropic").lower().strip()
+    model = settings.GEMINI_MODEL if provider == "gemini" else settings.LLM_MODEL
+    return {
+        "provider": provider,
+        "model": model,
+        "anthropic_key_set": bool(settings.ANTHROPIC_API_KEY),
+        "gemini_key_set": bool(settings.GEMINI_API_KEY),
+    }

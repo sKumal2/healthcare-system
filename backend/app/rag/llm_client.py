@@ -1,4 +1,17 @@
-"""Anthropic Claude client with retry, streaming-collection, and token logging."""
+"""Provider-agnostic LLM client.
+
+Supports Anthropic Claude and Google Gemini. Select the active provider via
+the ``LLM_PROVIDER`` setting in ``.env``:
+
+  * ``anthropic`` — Claude (uses ``ANTHROPIC_API_KEY``, paid)
+  * ``gemini``    — Google Gemini (uses ``GEMINI_API_KEY``, free tier)
+
+Callers should normally construct ``LLMClient()`` with no arguments and let
+settings drive the choice. The legacy keyword-form
+``LLMClient(api_key=..., model=..., client=..., backoff_seconds=...)`` is
+retained so existing tests and direct-instantiation call sites that target
+the Anthropic streaming path continue to work unchanged.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +19,7 @@ import asyncio
 import logging
 from typing import Any
 
+from app.core.config import settings
 from app.rag.exceptions import (
     LLMAPIError,
     LLMConnectionError,
@@ -19,21 +33,21 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 
 
-class LLMClient:
-    """Async wrapper around the Anthropic SDK with retry and token tracking.
+# ─────────────────────────────────────────
+# Anthropic provider — streamed + retry
+# ─────────────────────────────────────────
 
-    Streaming is used internally to avoid hitting per-request size limits, but
-    the public interface returns the assembled string so callers don't need
-    to deal with chunk plumbing.
-    """
+
+class _AnthropicProvider:
+    """Async wrapper around the Anthropic SDK with retry and token tracking."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-sonnet-4-20250514",
-        max_tokens: int = 1024,
-        client: Any = None,
-        backoff_seconds: tuple[float, ...] = _DEFAULT_BACKOFF_SECONDS,
+        model: str,
+        max_tokens: int,
+        client: Any | None,
+        backoff_seconds: tuple[float, ...],
     ) -> None:
         if not api_key and client is None:
             raise ValueError("ANTHROPIC_API_KEY is required to call the LLM.")
@@ -45,7 +59,6 @@ class LLMClient:
 
     @staticmethod
     def _build_client(api_key: str) -> Any:
-        """Lazy-import the Anthropic SDK so unit tests can run without it."""
         try:
             import anthropic  # type: ignore
         except ImportError as exc:
@@ -57,11 +70,6 @@ class LLMClient:
 
     @staticmethod
     def _classify_exception(exc: BaseException) -> LLMError:
-        """Map an SDK exception to one of our public exception types.
-
-        Imports ``anthropic`` lazily so this stays usable in environments
-        where the SDK isn't installed (e.g. CI without network deps).
-        """
         try:
             import anthropic  # type: ignore
         except ImportError:
@@ -78,7 +86,6 @@ class LLMClient:
     async def _stream_once(
         self, system_prompt: str, user_prompt: str
     ) -> tuple[str, dict[str, int]]:
-        """Single streamed call. Returns ``(text, usage)``."""
         text_parts: list[str] = []
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
@@ -98,12 +105,6 @@ class LLMClient:
         return "".join(text_parts), usage
 
     async def complete(self, system_prompt: str, user_prompt: str) -> str:
-        """Send the prompts to the LLM and return the assembled response text.
-
-        Retries up to ``len(backoff_seconds)`` times on transient errors with
-        exponential backoff. Logs token usage on success. Re-raises a
-        :class:`LLMError` subclass on terminal failure.
-        """
         last_exc: LLMError | None = None
         attempts = len(self.backoff_seconds) + 1
 
@@ -113,6 +114,7 @@ class LLMClient:
                 logger.info(
                     "llm_call_success",
                     extra={
+                        "provider": "anthropic",
                         "model": self.model,
                         "input_tokens": usage["input_tokens"],
                         "output_tokens": usage["output_tokens"],
@@ -144,3 +146,164 @@ class LLMClient:
 
         assert last_exc is not None
         raise last_exc
+
+
+# ─────────────────────────────────────────
+# Gemini provider
+# ─────────────────────────────────────────
+
+
+class _GeminiProvider:
+    """Google Gemini provider — uses the synchronous SDK off the event loop."""
+
+    def __init__(self, api_key: str, model_name: str) -> None:
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is required to call the LLM.")
+        try:
+            import google.generativeai as genai  # type: ignore
+        except ImportError as exc:
+            raise LLMError(
+                "The 'google-generativeai' package is required to call Gemini. "
+                "Install with: pip install google-generativeai"
+            ) from exc
+        genai.configure(api_key=api_key)
+        self._genai = genai
+        self._model_name = model_name
+
+    @staticmethod
+    def _classify(exc: BaseException) -> LLMError:
+        msg = str(exc).lower()
+        rate_signals = ("quota", "rate limit", "rate_limit", "ratelimit",
+                        "429", "resource_exhausted", "too many requests")
+        if any(s in msg for s in rate_signals):
+            return LLMRateLimitError(str(exc))
+        auth_signals = ("api key", "api_key", "authentication", "unauthorized",
+                        "permission denied", "permission_denied", "401", "403")
+        if any(s in msg for s in auth_signals):
+            return LLMAPIError(f"Invalid Gemini API key or permission denied: {exc}")
+        conn_signals = ("connection", "timeout", "unavailable", "deadline exceeded")
+        if any(s in msg for s in conn_signals):
+            return LLMConnectionError(str(exc))
+        return LLMAPIError(str(exc))
+
+    async def complete(self, system_prompt: str, user_prompt: str) -> str:
+        try:
+            model = self._genai.GenerativeModel(
+                model_name=self._model_name,
+                system_instruction=system_prompt,
+            )
+            response = await asyncio.to_thread(model.generate_content, user_prompt)
+            text = response.text or ""
+            usage_meta = getattr(response, "usage_metadata", None)
+            input_tokens = getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0
+            output_tokens = getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0
+            logger.info(
+                "llm_call_success",
+                extra={
+                    "provider": "gemini",
+                    "model": self._model_name,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            )
+            return text
+        except Exception as raw_exc:
+            mapped = self._classify(raw_exc)
+            logger.error("llm_call_failed: %s", mapped)
+            raise mapped from raw_exc
+
+
+# ─────────────────────────────────────────
+# Unified client
+# ─────────────────────────────────────────
+
+
+class LLMClient:
+    """Provider-agnostic LLM client.
+
+    Construction:
+
+    * ``LLMClient()`` — read ``settings.LLM_PROVIDER`` and route to the
+      matching backend. This is the production path.
+    * ``LLMClient(api_key=..., model=..., client=..., backoff_seconds=...)``
+      — legacy direct-Anthropic construction. Preserved for existing tests
+      and call sites; ignores ``LLM_PROVIDER``.
+    """
+
+    _SENTINEL: Any = object()
+
+    def __init__(
+        self,
+        api_key: Any = _SENTINEL,
+        model: str = "claude-sonnet-4-20250514",
+        max_tokens: int = 1024,
+        client: Any = None,
+        backoff_seconds: tuple[float, ...] = _DEFAULT_BACKOFF_SECONDS,
+    ) -> None:
+        explicit = api_key is not LLMClient._SENTINEL or client is not None
+
+        if explicit:
+            # Legacy Anthropic-direct path — preserves existing tests.
+            self._provider: _AnthropicProvider | _GeminiProvider = _AnthropicProvider(
+                api_key=api_key if api_key is not LLMClient._SENTINEL else "",
+                model=model,
+                max_tokens=max_tokens,
+                client=client,
+                backoff_seconds=backoff_seconds,
+            )
+            # Expose attributes the legacy tests/callers expect.
+            self.api_key = self._provider.api_key  # type: ignore[attr-defined]
+            self.model = self._provider.model  # type: ignore[attr-defined]
+            self.max_tokens = self._provider.max_tokens  # type: ignore[attr-defined]
+            self.backoff_seconds = self._provider.backoff_seconds  # type: ignore[attr-defined]
+            self._client = self._provider._client  # type: ignore[attr-defined]
+            return
+
+        # No-arg path: choose provider from settings.
+        provider_name = (settings.LLM_PROVIDER or "anthropic").lower().strip()
+
+        if provider_name == "gemini":
+            if not settings.GEMINI_API_KEY:
+                raise ValueError(
+                    "LLM_PROVIDER=gemini but GEMINI_API_KEY is not set in .env"
+                )
+            logger.info("LLM provider: Google Gemini (%s)", settings.GEMINI_MODEL)
+            self._provider = _GeminiProvider(
+                api_key=settings.GEMINI_API_KEY,
+                model_name=settings.GEMINI_MODEL,
+            )
+        elif provider_name == "anthropic":
+            if not settings.ANTHROPIC_API_KEY:
+                raise ValueError(
+                    "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set in .env"
+                )
+            logger.info("LLM provider: Anthropic Claude (%s)", settings.LLM_MODEL)
+            self._provider = _AnthropicProvider(
+                api_key=settings.ANTHROPIC_API_KEY,
+                model=settings.LLM_MODEL,
+                max_tokens=max_tokens,
+                client=None,
+                backoff_seconds=backoff_seconds,
+            )
+        else:
+            raise ValueError(
+                f"Unknown LLM_PROVIDER='{provider_name}'. "
+                "Valid options: 'anthropic', 'gemini'"
+            )
+
+    async def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """Send the prompts to the active provider and return assembled text."""
+        return await self._provider.complete(system_prompt, user_prompt)
+
+    @property
+    def provider_name(self) -> str:
+        """Name of the active provider: ``"anthropic"`` or ``"gemini"``."""
+        return "gemini" if isinstance(self._provider, _GeminiProvider) else "anthropic"
+
+    # Legacy method preserved for direct Anthropic-streaming callers/tests.
+    async def _stream_once(
+        self, system_prompt: str, user_prompt: str
+    ) -> tuple[str, dict[str, int]]:
+        if not isinstance(self._provider, _AnthropicProvider):
+            raise LLMAPIError("_stream_once is only available on the Anthropic provider")
+        return await self._provider._stream_once(system_prompt, user_prompt)

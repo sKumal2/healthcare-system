@@ -8,6 +8,7 @@ disclaimer / citation rules are always present.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, List, Optional
@@ -45,12 +46,22 @@ class SourceMetadata(BaseModel):
     similarity_score: float
 
 
+_MEDICAL_DISCLAIMER = (
+    "This information is for educational purposes only and does not constitute "
+    "medical advice. Always consult a qualified healthcare professional for "
+    "medical decisions."
+)
+
+
 class QueryResponse(BaseModel):
     """Response model containing the answer and sources."""
 
     question: str
     answer: str
     sources: List[SourceMetadata]
+    confidence_score: float = 0.0
+    processing_time_ms: int = 0
+    disclaimer: str = _MEDICAL_DISCLAIMER
     tokens_used: Optional[int] = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     query_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -126,12 +137,14 @@ class QueryService:
         question = query_request.question
         top_k = query_request.top_k
         query_id = uuid.uuid4().hex
+        t_start = time.monotonic()
 
         context_chunks = await self._retrieve_context_chunks(
             question, top_k, organization_id
         )
 
         if not context_chunks:
+            elapsed_ms = int((time.monotonic() - t_start) * 1000)
             logger.info(
                 "no_context_chunks query_id=%s user_id=%s",
                 query_id,
@@ -141,12 +154,15 @@ class QueryService:
                 question=question,
                 answer=_INSUFFICIENT_CONTEXT_ANSWER,
                 sources=[],
+                confidence_score=0.0,
+                processing_time_ms=elapsed_ms,
                 tokens_used=None,
                 query_id=query_id,
             )
 
         system_prompt, user_prompt = self._build_prompt(question, context_chunks)
         answer = await self._generate_answer(system_prompt, user_prompt)
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
         # Dedup sources by document_id, keeping the highest-scoring chunk.
         best_chunks: dict[str, dict[str, Any]] = {}
@@ -167,18 +183,28 @@ class QueryService:
             for doc_id, c in best_chunks.items()
         ]
 
+        # Mean similarity of top-3 sources as confidence proxy.
+        top_scores = sorted(
+            (s.similarity_score for s in sources), reverse=True
+        )[:3]
+        confidence_score = round(sum(top_scores) / len(top_scores), 3) if top_scores else 0.0
+
         logger.info(
-            "query_answered query_id=%s user_id=%s session_id=%s sources=%d",
+            "query_answered query_id=%s user_id=%s session_id=%s sources=%d confidence=%.3f ms=%d",
             query_id,
             query_request.user_id,
             query_request.session_id,
             len(sources),
+            confidence_score,
+            elapsed_ms,
         )
 
         return QueryResponse(
             question=question,
             answer=answer,
             sources=sources,
+            confidence_score=confidence_score,
+            processing_time_ms=elapsed_ms,
             tokens_used=None,
             query_id=query_id,
         )

@@ -67,8 +67,11 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str = ""
 
     # ----- LLM -----
+    LLM_PROVIDER: str = "anthropic"  # "anthropic" | "gemini"
     ANTHROPIC_API_KEY: str = ""
     LLM_MODEL: str = "claude-sonnet-4-20250514"
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     MAX_PROMPT_TOKENS: int = 6000
 
     # ----- RAG Tuning -----

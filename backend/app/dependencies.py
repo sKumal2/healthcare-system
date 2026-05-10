@@ -11,7 +11,6 @@ from functools import lru_cache
 
 from fastapi import Depends
 
-from app.core.config import settings
 from app.db.vector_db import VectorDBClient, get_vector_db_client
 from app.rag.llm_client import LLMClient
 from app.services.document_service import DocumentService
@@ -20,10 +19,8 @@ from app.services.query_service import QueryService
 
 @lru_cache(maxsize=1)
 def get_llm_client() -> LLMClient:
-    return LLMClient(
-        api_key=settings.ANTHROPIC_API_KEY,
-        model=settings.LLM_MODEL,
-    )
+    """Return a process-wide LLMClient routed via settings.LLM_PROVIDER."""
+    return LLMClient()
 
 
 def get_document_service(
