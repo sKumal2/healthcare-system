@@ -22,7 +22,12 @@ interface AuthState {
 
 interface UseAuthReturn extends AuthState {
   login: (email: string, password: string) => Promise<boolean>;
-  register: (email: string, password: string, fullName: string) => Promise<boolean>;
+  register: (
+    email: string,
+    password: string,
+    fullName: string,
+    inviteCode?: string,
+  ) => Promise<boolean>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -100,12 +105,22 @@ export function useAuth(): UseAuthReturn {
     }
   }, []);
 
-  const register = useCallback(async (email: string, password: string, fullName: string): Promise<boolean> => {
+  const register = useCallback(async (
+    email: string,
+    password: string,
+    fullName: string,
+    inviteCode?: string,
+  ): Promise<boolean> => {
     setState((s) => ({ ...s, isLoading: true, error: null }));
     try {
       const { data } = await api.post<{ access_token: string; refresh_token: string }>(
         "/auth/register",
-        { email: email.toLowerCase().trim(), password, full_name: fullName.trim() }
+        {
+          email: email.toLowerCase().trim(),
+          password,
+          full_name: fullName.trim(),
+          ...(inviteCode ? { invite_code: inviteCode.toUpperCase().trim() } : {}),
+        }
       );
       setTokens(data.access_token, data.refresh_token);
       const { data: identity } = await api.get<UserIdentity>("/auth/me");
@@ -118,6 +133,8 @@ export function useAuth(): UseAuthReturn {
       let message: string;
       if (httpStatus === 409) {
         message = "An account with this email already exists.";
+      } else if (httpStatus === 404) {
+        message = "Invalid organization code. Please check with your administrator.";
       } else if (httpStatus === 422) {
         message = "Please check your details and try again.";
       } else {

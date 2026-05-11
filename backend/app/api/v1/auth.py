@@ -8,9 +8,11 @@ SQLAlchemy; password hashes are checked with passlib's bcrypt context.
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
@@ -60,6 +62,7 @@ class RegisterRequest(BaseModel):
     email: str = Field(..., min_length=3)
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=2)
+    invite_code: Optional[str] = Field(None, max_length=20)
 
 
 def _verify_password(plain: str, hashed: str) -> bool:
@@ -93,31 +96,61 @@ async def register(
     payload: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ) -> TokenPair:
-    """Register a new user and return tokens immediately — no email verify for now."""
+    """Register a new user.
+
+    If invite_code is provided → join existing org as PATIENT.
+    If no invite_code → create new org, user becomes ORG_OWNER.
+    """
     from app.models.database import User, Organization
     from app.models.enums import RoleEnum
-    from fastapi import HTTPException
 
-    existing = await db.execute(select(User).where(User.email == payload.email.lower()))
+    email_normalized = payload.email.lower().strip()
+
+    existing = await db.execute(select(User).where(User.email == email_normalized))
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists."
         )
 
-    org = Organization(
-        name=f"{payload.full_name}'s Organization",
-        email=payload.email.lower(),
-        is_active=True,
-    )
-    db.add(org)
-    await db.flush()
+    if payload.invite_code:
+        code = payload.invite_code.upper().strip()
+        org_result = await db.execute(
+            select(Organization).where(
+                Organization.invite_code == code,
+                Organization.is_active == True,
+            )
+        )
+        org = org_result.scalar_one_or_none()
+
+        if not org:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invalid organization code. Please check with your administrator."
+            )
+
+        role = RoleEnum.PATIENT
+        logger.info("User %s joining org '%s' via invite code", email_normalized, org.name)
+
+    else:
+        invite_code = secrets.token_hex(4).upper()
+        org = Organization(
+            name=f"{payload.full_name.split()[0]}'s Organization",
+            email=email_normalized,
+            is_active=True,
+            invite_code=invite_code,
+        )
+        db.add(org)
+        await db.flush()
+
+        role = RoleEnum.ORGANIZATION_OWNER
+        logger.info("New org created with invite code: %s", invite_code)
 
     user = User(
-        email=payload.email.lower().strip(),
+        email=email_normalized,
         full_name=payload.full_name.strip(),
         password_hash=pwd_context.hash(payload.password),
-        role=RoleEnum.PATIENT,
+        role=role,
         organization_id=org.id,
         is_active=True,
         is_email_verified=False,
@@ -127,9 +160,9 @@ async def register(
     await db.refresh(user)
 
     user_id = str(user.id)
-    role = user.role.value
-    access = create_access_token({"sub": user_id, "role": role})
-    refresh = create_refresh_token(user_id, role=role)
+    role_value = user.role.value
+    access = create_access_token({"sub": user_id, "role": role_value})
+    refresh = create_refresh_token(user_id, role=role_value)
     await store_refresh_token(user_id, refresh)
     return TokenPair(access_token=access, refresh_token=refresh)
 

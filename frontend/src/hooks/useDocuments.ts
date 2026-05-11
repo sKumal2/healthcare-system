@@ -41,10 +41,10 @@ const INITIAL_UPLOAD_STATE: UploadState = {
   success: false,
 };
 
-function mapUploadError(status: number | undefined): string {
-  if (status === 413) return "File is too large. Maximum size is 1MB.";
+function mapUploadError(status: number | undefined, detail?: string): string {
+  if (status === 413) return "File is too large. Maximum size is 50MB.";
   if (status === 415) return "File type not supported. Upload PDF or text files.";
-  if (status === 422) return "Please fill in all required fields.";
+  if (status === 422) return detail || "Upload failed: invalid file or missing fields.";
   return "Upload failed. Please try again.";
 }
 
@@ -54,7 +54,7 @@ function mapDeleteError(status: number | undefined): string {
   return "Failed to delete document. Please try again.";
 }
 
-function getStatus(err: unknown): number | undefined {
+function getErrorInfo(err: unknown): { status?: number; detail?: string } {
   if (
     err &&
     typeof err === "object" &&
@@ -63,9 +63,10 @@ function getStatus(err: unknown): number | undefined {
     typeof err.response === "object" &&
     "status" in err.response
   ) {
-    return (err.response as { status: number }).status;
+    const res = err.response as { status: number; data?: { detail?: string } };
+    return { status: res.status, detail: res.data?.detail };
   }
-  return undefined;
+  return {};
 }
 
 export function useDocuments(): UseDocumentsReturn {
@@ -104,7 +105,6 @@ export function useDocuments(): UseDocumentsReturn {
 
     try {
       await api.post("/documents", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
         onUploadProgress: (e) => {
           const total = e.total ?? 1;
           const pct = Math.round((e.loaded * 100) / total);
@@ -114,10 +114,11 @@ export function useDocuments(): UseDocumentsReturn {
       setUploadState({ isUploading: false, progress: 100, error: null, success: true });
       await fetchDocuments();
     } catch (err: unknown) {
+      const { status, detail } = getErrorInfo(err);
       setUploadState({
         isUploading: false,
         progress: 0,
-        error: mapUploadError(getStatus(err)),
+        error: mapUploadError(status, detail),
         success: false,
       });
     }
@@ -130,7 +131,7 @@ export function useDocuments(): UseDocumentsReturn {
       await api.delete(`/documents/${id}`);
     } catch (err: unknown) {
       setDocuments(previous);
-      setError(mapDeleteError(getStatus(err)));
+      setError(mapDeleteError(getErrorInfo(err).status));
       await fetchDocuments();
     }
   }

@@ -17,7 +17,7 @@ interface DocumentUploaderProps {
   onResetStatus: () => void;
 }
 
-const MAX_BYTES = 1_048_576;
+const MAX_BYTES = 52_428_800; // 50MB
 const ALLOWED_TYPES = ["application/pdf", "text/plain"];
 
 const SUGGESTED_SOURCES: Array<{ label: string; url: string }> = [
@@ -85,7 +85,7 @@ export function DocumentUploader({
       return "File type not supported. Upload PDF or TXT files.";
     }
     if (candidate.size > MAX_BYTES) {
-      return "File is too large. Maximum size is 1MB.";
+      return "File is too large. Maximum size is 50MB.";
     }
     return null;
   }
@@ -210,7 +210,7 @@ export function DocumentUploader({
                   Drag &amp; drop your file here
                 </p>
                 <p className="text-xs text-slate-500">or click to browse</p>
-                <p className="mt-1 text-xs text-slate-400">PDF or TXT · Max 1MB</p>
+                <p className="mt-1 text-xs text-slate-400">PDF or TXT · Max 50MB</p>
               </>
             )}
             <input

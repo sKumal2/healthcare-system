@@ -40,6 +40,7 @@ export function RegisterForm() {
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
   const [nameError, setNameError] = useState("");
@@ -96,7 +97,7 @@ export function RegisterForm() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validate()) return;
-    const success = await register(email, password, fullName);
+    const success = await register(email, password, fullName, inviteCode || undefined);
     if (success) {
       router.push("/dashboard");
     }
@@ -206,6 +207,31 @@ export function RegisterForm() {
         {passwordError && (
           <p id="password-error" className="mt-1 text-xs text-red-600">{passwordError}</p>
         )}
+      </div>
+
+      <div className="mb-6">
+        <label htmlFor="invite-code" className="block text-sm font-medium text-slate-700 mb-1.5">
+          Organization Code
+          <span className="text-slate-400 font-normal ml-1">(optional)</span>
+        </label>
+        <Input
+          id="invite-code"
+          type="text"
+          placeholder="e.g. A3F2B891"
+          value={inviteCode}
+          onChange={(e) => {
+            setInviteCode(e.target.value.toUpperCase());
+            clearError();
+          }}
+          disabled={isLoading}
+          className="rounded-lg w-full uppercase tracking-widest"
+          maxLength={20}
+          autoComplete="off"
+        />
+        <p className="text-xs text-slate-400 mt-1">
+          Have a code from your organization? Enter it to join their workspace.
+          Leave empty to create your own organization.
+        </p>
       </div>
 
       {error && (
