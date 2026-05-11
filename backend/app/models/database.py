@@ -41,6 +41,13 @@ class Organization(BaseModel):
     max_users: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     max_api_keys: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
 
+    invite_code: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+
     users: Mapped[list["User"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
     documents: Mapped[list["Document"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
     queries: Mapped[list["Query"]] = relationship(back_populates="organization", cascade="all, delete-orphan")

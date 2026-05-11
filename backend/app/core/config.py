@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_ADMIN_REQUESTS: int = 300
 
     # ----- Request Validation -----
-    MAX_REQUEST_SIZE_BYTES: int = 1_048_576  # 1MB
+    MAX_REQUEST_SIZE_BYTES: int = 52_428_800  # 50MB — large enough for PDF uploads
 
     # ----- Security -----
     ADMIN_IP_ALLOWLIST: str = ""  # comma-separated CIDRs, empty = disabled

@@ -13,6 +13,8 @@ from app.dependencies import get_document_service
 from app.gateway.auth.dependencies import get_current_user, require_role
 from app.gateway.auth.models import UserIdentity
 from app.services.document_service import DocumentService
+import io
+
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 require_admin = require_role("admin")
@@ -50,12 +52,31 @@ async def upload_document(
     content = await file.read()
 
     if file.content_type == "application/pdf":
-        import io
+        try:
+            import logging
+            from pypdf import PdfReader
 
-        from PyPDF2 import PdfReader
+            # Silence pypdf's noisy warnings (e.g. "EOF marker not found")
+            logging.getLogger("pypdf").setLevel(logging.ERROR)
 
-        reader = PdfReader(io.BytesIO(content))
-        document_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            reader = PdfReader(io.BytesIO(content), strict=False)
+            document_text = "\n".join(
+                page.extract_text() or "" for page in reader.pages
+            )
+            if not document_text.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail="No text could be extracted from this PDF. It may be a scanned image — try a text-based PDF."
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            msg = str(exc)
+            if "truncated" in msg.lower() or "stream has ended" in msg.lower() or "EOF" in msg:
+                detail = "PDF appears to be incomplete or truncated — try re-downloading the file."
+            else:
+                detail = f"Could not read PDF: {msg}. Make sure it is a valid, non-password-protected PDF."
+            raise HTTPException(status_code=422, detail=detail)
     else:
         document_text = content.decode("utf-8", errors="ignore")
 

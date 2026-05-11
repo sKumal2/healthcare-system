@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.gateway.auth.dependencies import get_current_user
 from app.gateway.auth.models import UserIdentity
-from app.models.database import User
+from app.models.database import Organization, User
 from app.models.enums import RoleEnum
 from app.models.admin_schemas import (
     UserCreate, UserUpdate, UserResponse, AuditLogFilters,
@@ -179,6 +179,70 @@ async def update_rate_limits(
     service: AdminService = Depends(get_admin_service),
 ):
     return await service.update_rate_limits(user_id, limits)
+
+
+# ============ ORG INVITE CODE ============
+
+@router.get("/org/invite-code", response_model=dict)
+async def get_invite_code(
+    db: AsyncSession = Depends(get_db),
+    admin: UserIdentity = Depends(require_admin),
+):
+    """Get the organization's invite code to share with new users."""
+    import secrets
+
+    result = await db.execute(select(User).where(User.id == admin.user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == user.organization_id)
+    )
+    org = org_result.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    if not org.invite_code:
+        org.invite_code = secrets.token_hex(4).upper()
+        await db.commit()
+        await db.refresh(org)
+
+    return {
+        "invite_code": org.invite_code,
+        "org_name": org.name,
+        "share_message": f"Join {org.name} on HealthRAG using code: {org.invite_code}",
+    }
+
+
+@router.post("/org/regenerate-invite-code", response_model=dict)
+async def regenerate_invite_code(
+    db: AsyncSession = Depends(get_db),
+    admin: UserIdentity = Depends(require_admin),
+):
+    """Generate a new invite code (invalidates old one)."""
+    import secrets
+
+    result = await db.execute(select(User).where(User.id == admin.user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == user.organization_id)
+    )
+    org = org_result.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    org.invite_code = secrets.token_hex(4).upper()
+    await db.commit()
+    await db.refresh(org)
+
+    return {
+        "invite_code": org.invite_code,
+        "message": "Invite code regenerated. Old code is no longer valid.",
+    }
 
 
 # ============ HEALTH CHECK ============

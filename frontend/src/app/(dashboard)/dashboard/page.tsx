@@ -1,5 +1,6 @@
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Users, MessageSquare, FileText, Clock } from "lucide-react";
+import { InviteCodeCard } from "@/components/admin/InviteCodeCard";
 
 interface StatCard {
   label: string;
@@ -37,6 +38,10 @@ export default function DashboardPage() {
             </div>
           );
         })}
+      </div>
+
+      <div className="mt-6 max-w-md">
+        <InviteCodeCard />
       </div>
     </PageWrapper>
   );
